@@ -4,16 +4,29 @@ from telegram.ext import Application, CommandHandler, CallbackQueryHandler, Mess
 import httpx
 import os
 from dotenv import load_dotenv
+import logging
 
 load_dotenv()
+
+# Setup logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 app = FastAPI()
 
 # Config
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-WOOCOMMERCE_URL = os.getenv("WOOCOMMERCE_URL")  # https://deencommerce.com
+WOOCOMMERCE_URL = os.getenv("WOOCOMMERCE_URL")
 WOOCOMMERCE_KEY = os.getenv("WOOCOMMERCE_KEY")
 WOOCOMMERCE_SECRET = os.getenv("WOOCOMMERCE_SECRET")
+
+# Check environment variables
+if not all([TELEGRAM_BOT_TOKEN, WOOCOMMERCE_URL, WOOCOMMERCE_KEY, WOOCOMMERCE_SECRET]):
+    logger.error("Missing environment variables!")
+    logger.error(f"TELEGRAM_BOT_TOKEN: {bool(TELEGRAM_BOT_TOKEN)}")
+    logger.error(f"WOOCOMMERCE_URL: {bool(WOOCOMMERCE_URL)}")
+    logger.error(f"WOOCOMMERCE_KEY: {bool(WOOCOMMERCE_KEY)}")
+    logger.error(f"WOOCOMMERCE_SECRET: {bool(WOOCOMMERCE_SECRET)}")
 
 application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
 
@@ -31,6 +44,7 @@ async def get_all_products(limit=20):
             )
             return response.json()
     except Exception as e:
+        logger.error(f"Error fetching products: {str(e)}")
         return {"error": str(e)}
 
 async def get_product_by_id(product_id):
@@ -44,6 +58,7 @@ async def get_product_by_id(product_id):
             )
             return response.json()
     except Exception as e:
+        logger.error(f"Error fetching product {product_id}: {str(e)}")
         return {"error": str(e)}
 
 async def search_products(keyword):
@@ -58,6 +73,7 @@ async def search_products(keyword):
             )
             return response.json()
     except Exception as e:
+        logger.error(f"Error searching products: {str(e)}")
         return {"error": str(e)}
 
 async def get_customer_orders(customer_email):
@@ -72,6 +88,7 @@ async def get_customer_orders(customer_email):
             )
             return response.json()
     except Exception as e:
+        logger.error(f"Error fetching orders for {customer_email}: {str(e)}")
         return {"error": str(e)}
 
 # ==================== Telegram Handlers ====================
@@ -128,6 +145,7 @@ async def browse_products(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(text=text, reply_markup=reply_markup, parse_mode="Markdown")
     
     except Exception as e:
+        logger.error(f"Error in browse_products: {str(e)}")
         await query.edit_message_text(text=f"❌ Error: {str(e)}")
 
 async def view_product(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -172,10 +190,11 @@ async def view_product(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     caption=f"_{product['name']}_",
                     parse_mode="Markdown"
                 )
-            except:
-                pass  # Image error, continue without it
+            except Exception as e:
+                logger.warning(f"Could not send product image: {str(e)}")
     
     except Exception as e:
+        logger.error(f"Error in view_product: {str(e)}")
         await query.edit_message_text(text=f"❌ Error: {str(e)}")
 
 async def search_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -221,6 +240,7 @@ async def search_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(text=text, reply_markup=reply_markup, parse_mode="Markdown")
         
         except Exception as e:
+            logger.error(f"Error in search_handler: {str(e)}")
             await update.message.reply_text(f"❌ Error: {str(e)}")
 
 async def my_orders_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -295,6 +315,7 @@ async def handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(text=text, reply_markup=reply_markup, parse_mode="Markdown")
         
         except Exception as e:
+            logger.error(f"Error fetching orders: {str(e)}")
             await update.message.reply_text(f"❌ Error fetching orders: {str(e)}")
 
 async def back_to_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -315,13 +336,30 @@ application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_t
 
 # ==================== FastAPI Routes ====================
 
+@app.on_event("startup")
+async def startup():
+    """Initialize the application on startup"""
+    logger.info("Initializing Telegram application...")
+    await application.initialize()
+    logger.info("Telegram application initialized!")
+
+@app.on_event("shutdown")
+async def shutdown():
+    """Clean up on shutdown"""
+    logger.info("Shutting down Telegram application...")
+    await application.stop()
+
 @app.post("/telegram/webhook")
 async def webhook(request: Request):
     """Telegram webhook"""
-    data = await request.json()
-    update = Update.de_json(data, application.bot)
-    await application.process_update(update)
-    return {"ok": True}
+    try:
+        data = await request.json()
+        update = Update.de_json(data, application.bot)
+        await application.process_update(update)
+        return {"ok": True}
+    except Exception as e:
+        logger.error(f"Error processing update: {str(e)}")
+        return {"ok": False, "error": str(e)}
 
 @app.get("/")
 async def root():
