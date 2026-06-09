@@ -81,39 +81,13 @@ def preprocess_search_query(query):
     mapped_words = [SYNONYMS_MAP.get(w, w) for w in words]
     return " ".join(mapped_words)
 
-def load_pathao_config():
-    config = {}
-    path = "G:/deen_telegram_bot/.env"
-    if not os.path.exists(path):
-        return config
-    try:
-        with open(path, "r") as f:
-            in_section = False
-            for line in f:
-                line_str = line.strip()
-                if not line_str or line_str.startswith("#"):
-                    continue
-                if line_str == "[pathao]":
-                    in_section = True
-                    continue
-                if line_str.startswith("[") and line_str.endswith("]"):
-                    in_section = False
-                    continue
-                if in_section and "=" in line_str:
-                    parts = line_str.split("=", 1)
-                    config[parts[0].strip()] = parts[1].strip().strip('"').strip("'")
-    except Exception as e:
-        logger.error("Failed to parse [pathao] config from .env: %s", str(e))
-    return config
-
 async def get_pathao_tracking_status(consignment_id):
     try:
-        config = load_pathao_config()
-        base_url = config.get("base_url", "https://api-hermes.pathao.com").rstrip("/")
-        client_id = config.get("client_id")
-        client_secret = config.get("client_secret")
-        username = config.get("username")
-        password = config.get("password")
+        base_url = os.getenv("PATHAO_BASE_URL", "https://api-hermes.pathao.com").rstrip("/")
+        client_id = os.getenv("PATHAO_CLIENT_ID")
+        client_secret = os.getenv("PATHAO_CLIENT_SECRET")
+        username = os.getenv("PATHAO_USERNAME")
+        password = os.getenv("PATHAO_PASSWORD")
 
         if not all([client_id, client_secret, username, password]):
             return None
