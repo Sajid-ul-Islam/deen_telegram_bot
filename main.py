@@ -4,6 +4,7 @@ import logging
 import os
 import re
 import socket
+import time
 
 import httpx
 import json
@@ -139,6 +140,270 @@ async def lifespan(fastapi_app: FastAPI):
 app = FastAPI(lifespan=lifespan)
 
 
+class SimpleCache:
+    def __init__(self, ttl_seconds=3600):
+        self.ttl = ttl_seconds
+        self.store = {}
+
+    def get(self, key):
+        if key in self.store:
+            data, timestamp = self.store[key]
+            if time.time() - timestamp < self.ttl:
+                return data
+            else:
+                del self.store[key]
+        return None
+
+    def set(self, key, value):
+        self.store[key] = (value, time.time())
+
+    def clear(self):
+        self.store.clear()
+
+
+categories_cache = SimpleCache(ttl_seconds=3600)  # 1 hour
+products_cache = SimpleCache(ttl_seconds=1800)    # 30 minutes
+
+
+SYNONYMS_MAP = {
+    # Bangla terms
+    "জামা": "shirt",
+    "শার্ট": "shirt",
+    "প্যান্ট": "pants",
+    "পাঞ্জাবি": "panjabi",
+    "মানিব্যাগ": "wallet",
+    "গেঞ্জি": "t-shirt",
+
+    # Banglish terms
+    "jama": "shirt",
+    "shart": "shirt",
+    "shurt": "shirt",
+    "pant": "pants",
+    "pants": "pants",
+    "tshirt": "t-shirt",
+    "t-shirt": "t-shirt",
+    "teeshirt": "t-shirt",
+    "genji": "t-shirt",
+    "panjabi": "panjabi",
+    "punjabi": "panjabi",
+    "wallet": "wallet",
+    "moneybag": "wallet",
+    "bag": "wallet",
+    "polo": "polo",
+    "half sleeve": "half sleeve",
+    "halfshirt": "half sleeve",
+}
+
+
+def preprocess_search_query(query):
+    if not query:
+        return ""
+    q_clean = query.strip().lower()
+    if q_clean in SYNONYMS_MAP:
+        return SYNONYMS_MAP[q_clean]
+    words = q_clean.split()
+    mapped_words = [SYNONYMS_MAP.get(w, w) for w in words]
+    return " ".join(mapped_words)
+
+
+def load_pathao_config():
+    config = {}
+    path = "G:/deen_telegram_bot/.env"
+    if not os.path.exists(path):
+        return config
+    try:
+        with open(path, "r") as f:
+            in_section = False
+            for line in f:
+                line_str = line.strip()
+                if not line_str or line_str.startswith("#"):
+                    continue
+                if line_str == "[pathao]":
+                    in_section = True
+                    continue
+                if line_str.startswith("[") and line_str.endswith("]"):
+                    in_section = False
+                    continue
+                if in_section and "=" in line_str:
+                    parts = line_str.split("=", 1)
+                    config[parts[0].strip()] = parts[1].strip().strip('"').strip("'")
+    except Exception as e:
+        logger.error("Failed to parse [pathao] config from .env: %s", str(e))
+    return config
+
+
+async def get_pathao_tracking_status(consignment_id):
+    try:
+        config = load_pathao_config()
+        base_url = config.get("base_url", "https://api-hermes.pathao.com").rstrip("/")
+        client_id = config.get("client_id")
+        client_secret = config.get("client_secret")
+        username = config.get("username")
+        password = config.get("password")
+
+        if not all([client_id, client_secret, username, password]):
+            return None
+
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            token_resp = await client.post(f"{base_url}/aladdin/api/v1/issue-token", json={
+                "client_id": client_id,
+                "client_secret": client_secret,
+                "username": username,
+                "password": password,
+                "grant_type": "password"
+            })
+            if token_resp.status_code != 200:
+                return None
+
+            token = token_resp.json().get("access_token")
+            headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
+
+            track_resp = await client.get(f"{base_url}/aladdin/api/v1/packages/{consignment_id}/track", headers=headers)
+            if track_resp.status_code != 200:
+                return None
+
+            data = track_resp.json()
+            if data.get("error") and "Unauthorized" in data.get("message", ""):
+                return None
+
+            track_data = data.get("data", {})
+            status = track_data.get("status", "Unknown")
+            history = track_data.get("history", [])
+
+            text = f"📍 *Pathao Courier Status*: {md(status.upper())}\n"
+            if history:
+                text += "*Tracking History*:\n"
+                for h in history[:5]:
+                    time_str = h.get("time", "")
+                    desc = h.get("description", h.get("status", ""))
+                    text += f"  • _{md(time_str)}_: {md(desc)}\n"
+            return text
+    except Exception as e:
+        logger.error("Error fetching Pathao tracking status: %s", str(e))
+        return None
+
+
+def get_tracking_info(order):
+    if not isinstance(order, dict):
+        return None, None
+    meta_data = order.get("meta_data", [])
+    consignment_id = None
+    provider = None
+
+    for meta in meta_data:
+        key = str(meta.get("key", "")).lower()
+        value = str(meta.get("value", "")).strip()
+        if not value:
+            continue
+
+        if "ptc_consignment_id" in key or "pathao_consignment" in key:
+            consignment_id = value
+            provider = "Pathao"
+            break
+        elif "steadfast_consignment" in key or "steadfast_id" in key:
+            consignment_id = value
+            provider = "Steadfast"
+            break
+        elif "consignment_id" in key or "tracking_number" in key or "tracking_code" in key:
+            consignment_id = value
+            if "pathao" in key or value.upper().startswith("DD"):
+                provider = "Pathao"
+            elif "steadfast" in key:
+                provider = "Steadfast"
+            else:
+                provider = "Courier"
+            break
+
+    if consignment_id:
+        if provider == "Pathao":
+            url = f"https://merchant.pathao.com/tracking?consignment_id={consignment_id}"
+        elif provider == "Steadfast":
+            url = f"https://steadfast.com.bd/t/{consignment_id}"
+        else:
+            if consignment_id.upper().startswith("DD"):
+                url = f"https://merchant.pathao.com/tracking?consignment_id={consignment_id}"
+                provider = "Pathao"
+            else:
+                url = f"https://steadfast.com.bd/t/{consignment_id}"
+                provider = "Steadfast"
+        return consignment_id, url
+    return None, None
+
+
+def html_table_to_markdown(table_html):
+    rows = re.findall(r'<tr[^>]*>(.*?)</tr>', table_html, re.DOTALL | re.IGNORECASE)
+    md_rows = []
+
+    for row in rows:
+        cells = re.findall(r'<t[dh][^>]*>(.*?)</t[dh]>', row, re.DOTALL | re.IGNORECASE)
+        clean_cells = []
+        for cell in cells:
+            c = re.sub(r'<[^>]+>', '', cell)
+            c = html.unescape(c)
+            c = c.replace('\xa0', ' ').replace('\u200b', '')
+            c = c.strip()
+            clean_cells.append(c)
+        if clean_cells:
+            md_rows.append(clean_cells)
+
+    if not md_rows:
+        return ""
+
+    header_title = ""
+    start_idx = 0
+    if len(md_rows[0]) == 1 and len(md_rows) > 1:
+        header_title = f"📏 *{md_rows[0][0]}*"
+        start_idx = 1
+    elif len(md_rows[0]) == 1:
+        return f"📏 *{md_rows[0][0]}*"
+
+    table_lines = []
+    rows_to_format = md_rows[start_idx:]
+    if not rows_to_format:
+        return header_title
+
+    col_widths = {}
+    for r in rows_to_format:
+        for col_idx, cell in enumerate(r):
+            col_widths[col_idx] = max(col_widths.get(col_idx, 0), len(cell))
+
+    for idx, r in enumerate(rows_to_format):
+        row_str = " | ".join(f"{cell:<{col_widths.get(col_idx, len(cell))}}" for col_idx, cell in enumerate(r))
+        table_lines.append(row_str)
+        if idx == 0:
+            separator = "-+-".join("-" * col_widths.get(col_idx, len(cell)) for col_idx in range(len(r)))
+            table_lines.append(separator)
+
+    table_text = "\n".join(table_lines)
+
+    res = ""
+    if header_title:
+        res += header_title + "\n"
+    res += f"```\n{table_text}\n```"
+    return res
+
+
+def extract_and_format_size_chart(product):
+    if not isinstance(product, dict):
+        return None
+    for field in ["short_description", "description"]:
+        html_content = product.get(field, "")
+        if not html_content:
+            continue
+        tables = re.findall(r'<table[^>]*>.*?</table>', html_content, re.DOTALL | re.IGNORECASE)
+        for table in tables:
+            if any(x in table.lower() for x in ["size", "chart", "guide", "dimension", "measure"]):
+                return html_table_to_markdown(table)
+    return None
+
+
+def strip_html_excluding_table(html_content):
+    if not html_content:
+        return ""
+    cleaned = re.sub(r'<table[^>]*>.*?</table>', '', html_content, flags=re.DOTALL | re.IGNORECASE)
+    return strip_html(cleaned)
+
+
 # ==================== Formatting Helpers ====================
 
 def md(value):
@@ -242,11 +507,20 @@ async def get_all_products(limit=20):
 
 
 async def get_categories(limit=100):
-    """Fetch product categories that have products."""
-    return await woo_get(
+    """Fetch product categories that have products (with caching)."""
+    cache_key = f"categories_{limit}"
+    cached = categories_cache.get(cache_key)
+    if cached is not None:
+        logger.info("Using cached categories list.")
+        return cached
+
+    categories = await woo_get(
         "products/categories",
         params={"per_page": limit, "orderby": "name", "order": "asc", "hide_empty": True},
     )
+    if isinstance(categories, list) and len(categories) > 0:
+        categories_cache.set(cache_key, categories)
+    return categories
 
 
 async def get_products_by_category(category_id, page=1, limit=8):
@@ -281,8 +555,17 @@ async def get_products_page(page=1, limit=8):
 
 
 async def get_product_by_id(product_id):
-    """Fetch a single product."""
-    return await woo_get(f"products/{product_id}")
+    """Fetch a single product (with caching)."""
+    cache_key = f"product_{product_id}"
+    cached = products_cache.get(cache_key)
+    if cached is not None:
+        logger.info("Using cached product data for product ID: %s", product_id)
+        return cached
+
+    product = await woo_get(f"products/{product_id}")
+    if isinstance(product, dict) and "error" not in product:
+        products_cache.set(cache_key, product)
+    return product
 
 
 async def get_category_by_id(category_id):
@@ -292,10 +575,12 @@ async def get_category_by_id(category_id):
 
 async def search_products(keyword):
     """Search products by keyword."""
+    processed_keyword = preprocess_search_query(keyword)
+    logger.info("Searching products. Original: %s -> Processed: %s", keyword, processed_keyword)
     return await woo_get(
         "products",
         params={
-            "search": keyword,
+            "search": processed_keyword,
             "per_page": 10,
             "status": "publish",
             "stock_status": "instock",
@@ -311,7 +596,10 @@ async def get_order_by_id(order_id):
 # ==================== Conversational AI RAG Agent ====================
 
 SYSTEM_PROMPT = """You are an intelligent fashion shopping assistant for DeenCommerce,
-a Bangladeshi e-commerce store selling clothing and fashion items.
+a Bangladeshi e-commerce store selling clothing and fashion items on deencommerce.com.
+
+You must ALWAYS talk and respond ONLY in the context of deencommerce.com and its products, categories, orders, policies, and services.
+If the customer asks or talks about anything unrelated to deencommerce.com (such as general knowledge, other websites, coding, general questions, or non-DeenCommerce items/topics), you must politely decline to answer, inform them that you are the DeenCommerce shopping assistant, and redirect them back to deencommerce.com products, clothing items, or order inquiries.
 
 You have access to tools to:
 1. Search products by keyword or category
@@ -322,8 +610,26 @@ Your goals:
 - Help customers find exactly what they're looking for
 - Answer questions about products, prices, and availability
 - Make personalized recommendations based on their needs
-- Be conversational and friendly (in English or Bengali)
+- Be conversational and friendly
 - Handle queries intelligently by using tools when needed
+
+Language & Response Style:
+- Understand and reply in the user's preferred language, including English, Bangla (Bengali), and Banglish (Bengali written in Latin script).
+- Keep responses extremely to-the-point, concise, and direct without unnecessary fluff.
+- Be concise in Telegram (max 1000 characters per message).
+- Use emojis to make responses engaging.
+- Always mention prices in ৳ (Taka).
+
+Telegram Bot Context:
+You operate inside a Telegram bot. The user can also use the following slash commands:
+- /start : Go to the Main Menu and welcome greeting.
+- /browse : Browse clothing categories.
+- /search : Search for products.
+- /my_order : Check order status (requires order ID + email/phone).
+- /ask : Ask the AI assistant questions (e.g., "/ask blue shirts").
+If a user wants to perform these actions, you can mention or guide them to use these slash commands.
+
+When a customer asks for a size chart or size guide of a product, retrieve the product details and output its size_chart string exactly as provided (with the monospace code block formatting).
 
 When recommending or listing products, always include their website link (permalink) so the customer can easily view/buy them on the website.
 
@@ -332,10 +638,6 @@ When a customer asks a question:
 2. Decide which tools to use
 3. Retrieve relevant information from our database
 4. Provide a helpful, conversational response
-
-Be concise in Telegram (max 1000 characters per message).
-Use emojis to make responses engaging.
-Always mention prices in ৳ (Taka).
 """
 
 
@@ -440,6 +742,8 @@ class RAGAgent:
 
     async def search_products(self, query: str, limit: int = 5):
         """Search products by keyword"""
+        processed_query = preprocess_search_query(query)
+        logger.info("RAG search. Original: %s -> Processed: %s", query, processed_query)
         async with httpx.AsyncClient(
             auth=(self.woo_key, self.woo_secret),
             timeout=10
@@ -447,7 +751,7 @@ class RAGAgent:
             response = await client.get(
                 f"{self.woo_url}/wp-json/wc/v3/products",
                 params={
-                    "search": query,
+                    "search": processed_query,
                     "per_page": limit,
                     "status": "publish",
                     "stock_status": "instock"
@@ -470,28 +774,36 @@ class RAGAgent:
             ]
 
     async def get_product_details(self, product_id: int):
-        """Get detailed product information"""
-        async with httpx.AsyncClient(
-            auth=(self.woo_key, self.woo_secret),
-            timeout=10
-        ) as client:
-            response = await client.get(
-                f"{self.woo_url}/wp-json/wc/v3/products/{product_id}"
-            )
-            p = response.json()
+        """Get detailed product information (with caching)"""
+        cache_key = f"product_{product_id}"
+        p = products_cache.get(cache_key)
+        if p is None:
+            async with httpx.AsyncClient(
+                auth=(self.woo_key, self.woo_secret),
+                timeout=10
+            ) as client:
+                response = await client.get(
+                    f"{self.woo_url}/wp-json/wc/v3/products/{product_id}"
+                )
+                p = response.json()
+                if isinstance(p, dict) and "error" not in p:
+                    products_cache.set(cache_key, p)
 
-            return {
-                "id": p["id"],
-                "name": p["name"],
-                "price": p["price"],
-                "description": p.get("description", ""),
-                "stock": p.get("stock_quantity", "N/A"),
-                "categories": [c.get("name") for c in p.get("categories", [])],
-                "images": [img["src"] for img in p.get("images", [])],
-                "sku": p.get("sku", ""),
-                "attributes": p.get("attributes", []),
-                "permalink": p.get("permalink", "")
-            }
+        size_chart = extract_and_format_size_chart(p)
+        return {
+            "id": p["id"],
+            "name": p["name"],
+            "price": p["price"],
+            "description": p.get("description", ""),
+            "short_description": p.get("short_description", ""),
+            "size_chart": size_chart if size_chart else "No size chart available.",
+            "stock": p.get("stock_quantity", "N/A"),
+            "categories": [c.get("name") for c in p.get("categories", [])],
+            "images": [img["src"] for img in p.get("images", [])],
+            "sku": p.get("sku", ""),
+            "attributes": p.get("attributes", []),
+            "permalink": p.get("permalink", "")
+        }
 
     async def get_recommendations(self, category: str = None, price_range: str = None):
         """Get personalized product recommendations"""
@@ -1214,7 +1526,8 @@ async def view_product(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text += f"💰 Price: ৳{md(product.get('price', ''))}\n"
         text += f"{stock_display(product)}\n\n"
 
-        desc_clean = strip_html(product.get("description", "No description"))
+        # Strip table before rendering text to avoid clutter
+        desc_clean = strip_html_excluding_table(product.get("description", "No description"))
         if desc_clean:
             text += f"📝 {md(desc_clean[:300])}"
             if len(desc_clean) > 300:
@@ -1225,6 +1538,12 @@ async def view_product(update: Update, context: ContextTypes.DEFAULT_TYPE):
         permalink = product.get("permalink") if isinstance(product, dict) else None
         if permalink:
             keyboard.append([InlineKeyboardButton("🌐 View on Website", url=permalink)])
+
+        # Check if size chart is available
+        size_chart = extract_and_format_size_chart(product)
+        if size_chart:
+            keyboard.append([InlineKeyboardButton("📏 Size Chart", callback_data=f"size_chart_{product_id}")])
+
         keyboard.append([InlineKeyboardButton("← Back", callback_data="browse")])
         reply_markup = InlineKeyboardMarkup(keyboard)
 
@@ -1244,6 +1563,40 @@ async def view_product(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     except Exception as e:
         logger.error("Error in view_product: %s", str(e))
+        await query.edit_message_text(text=f"❌ Error: {md(e)}", parse_mode="Markdown")
+
+
+async def show_size_chart_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Callback when user clicks 'Size Chart' button on a product."""
+    query = update.callback_query
+    product_id = query.data.removeprefix("size_chart_")
+    await query.answer()
+
+    try:
+        product = await get_product_by_id(product_id)
+        if isinstance(product, dict) and "error" in product:
+            await query.edit_message_text(text=f"❌ Error: {md(product['error'])}", parse_mode="Markdown")
+            return
+
+        size_chart = extract_and_format_size_chart(product)
+        if not size_chart:
+            await query.edit_message_text(
+                text="❌ No size chart available for this product.",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("← Back to Product", callback_data=f"product_{product_id}")]])
+            )
+            return
+
+        text = f"📏 *Size Chart for {md(product.get('name', 'Product'))}*\n\n{size_chart}"
+        keyboard = [[InlineKeyboardButton("← Back to Product", callback_data=f"product_{product_id}")]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+
+        await query.edit_message_text(
+            text=text,
+            reply_markup=reply_markup,
+            parse_mode="Markdown"
+        )
+    except Exception as e:
+        logger.error("Error in show_size_chart_handler: %s", str(e))
         await query.edit_message_text(text=f"❌ Error: {md(e)}", parse_mode="Markdown")
 
 
@@ -1557,6 +1910,7 @@ application.add_handler(CallbackQueryHandler(my_order_handler, pattern="^my_orde
 application.add_handler(CallbackQueryHandler(ask_ai_callback_handler, pattern="^ask_ai$"))
 application.add_handler(CallbackQueryHandler(reset_ai_chat_handler, pattern="^reset_ai_chat$"))
 application.add_handler(CallbackQueryHandler(view_product, pattern="^product_"))
+application.add_handler(CallbackQueryHandler(show_size_chart_handler, pattern="^size_chart_"))
 application.add_handler(CallbackQueryHandler(back_to_menu, pattern="^start_menu$"))
 application.add_handler(CallbackQueryHandler(help_command, pattern="^help_menu$"))
 application.add_handler(CallbackQueryHandler(faq_handler, pattern="^faq_"))
