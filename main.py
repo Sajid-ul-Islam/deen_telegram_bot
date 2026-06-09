@@ -28,7 +28,16 @@ if not all([TELEGRAM_BOT_TOKEN, WOOCOMMERCE_URL, WOOCOMMERCE_KEY, WOOCOMMERCE_SE
     logger.error(f"WOOCOMMERCE_KEY: {bool(WOOCOMMERCE_KEY)}")
     logger.error(f"WOOCOMMERCE_SECRET: {bool(WOOCOMMERCE_SECRET)}")
 
-application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+from telegram.request import HTTPXRequest
+
+# Configure custom request client to force IPv4 and increase timeouts (resolves Hugging Face IPv6 routing issues)
+request_client = HTTPXRequest(
+    connect_timeout=30.0,
+    read_timeout=30.0,
+    httpx_kwargs={"transport": httpx.AsyncHTTPTransport(local_address="0.0.0.0")}
+)
+
+application = Application.builder().token(TELEGRAM_BOT_TOKEN).request(request_client).build()
 
 # ==================== WooCommerce API Helpers ====================
 
