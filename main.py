@@ -528,7 +528,7 @@ async def back_to_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ==================== Register Handlers ====================
 
-application.add_handler(CommandHandler("start", start))
+application.add_handler(CommandHandler(["start", "strat"], start))
 application.add_handler(CallbackQueryHandler(browse_products, pattern="^browse$"))
 application.add_handler(CallbackQueryHandler(show_products, pattern=r"^cat_\d+_\d+$"))
 application.add_handler(CallbackQueryHandler(show_products, pattern=r"^products_all_\d+$"))
