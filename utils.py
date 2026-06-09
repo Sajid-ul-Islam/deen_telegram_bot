@@ -224,35 +224,43 @@ def html_table_to_markdown(table_html):
     header_title = ""
     start_idx = 0
     if len(md_rows[0]) == 1 and len(md_rows) > 1:
-        header_title = f"📏 *{md_rows[0][0]}*"
+        header_title = f"📏 *{md(md_rows[0][0])}*"
         start_idx = 1
     elif len(md_rows[0]) == 1:
-        return f"📏 *{md_rows[0][0]}*"
+        return f"📏 *{md(md_rows[0][0])}*"
 
-    table_lines = []
     rows_to_format = md_rows[start_idx:]
     if not rows_to_format:
         return header_title
 
-    col_widths = {}
-    for r in rows_to_format:
-        for col_idx, cell in enumerate(r):
-            col_widths[col_idx] = max(col_widths.get(col_idx, 0), len(cell))
-
-    for idx, r in enumerate(rows_to_format):
-        row_str = " | ".join(f"{cell:<{col_widths.get(col_idx, len(cell))}}" for col_idx, cell in enumerate(r))
-        table_lines.append(row_str)
-        if idx == 0:
-            separator = "-+-".join("-" * col_widths.get(col_idx, len(cell)) for col_idx in range(len(r)))
-            table_lines.append(separator)
-
-    table_text = "\n".join(table_lines)
-
-    res = ""
-    if header_title:
-        res += header_title + "\n"
-    res += f"```\n{table_text}\n```"
-    return res
+    if len(rows_to_format) > 1:
+        headers = rows_to_format[0]
+        data_rows = rows_to_format[1:]
+        
+        lines = []
+        if header_title:
+            lines.append(header_title)
+            
+        for r in data_rows:
+            primary_val = r[0] if len(r) > 0 else ""
+            primary_head = headers[0] if len(headers) > 0 else ""
+            
+            lines.append(f"▪ *{md(primary_head)}: {md(primary_val)}*")
+            
+            details = []
+            for col_idx in range(1, len(r)):
+                head = headers[col_idx] if col_idx < len(headers) else f"Col{col_idx}"
+                val = r[col_idx]
+                details.append(f"{md(head)}: {md(val)}")
+            
+            if details:
+                lines.append("   " + " • ".join(details))
+            lines.append("")
+            
+        return "\n".join(lines).strip()
+    else:
+        # Just one row, print it normally
+        return " \\| ".join(md(c) for c in rows_to_format[0])
 
 def extract_and_format_size_chart(product):
     if not isinstance(product, dict):

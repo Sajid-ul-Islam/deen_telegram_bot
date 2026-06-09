@@ -282,7 +282,20 @@ user_agents = {}
 async def ai_chat_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle conversational AI queries"""
     user_id = update.effective_user.id
-    user_message = update.message.text
+    
+    if update.callback_query and update.callback_query.data == "retry_ai_chat":
+        await update.callback_query.answer()
+        user_message = context.user_data.get("last_ai_query")
+        if not user_message:
+            await update.effective_message.reply_text("❌ No previous query found.")
+            return
+    else:
+        user_message = update.message.text
+        if user_message:
+            context.user_data["last_ai_query"] = user_message
+
+    if not user_message:
+        return
 
     # Create agent for user if doesn't exist
     if user_id not in user_agents:
@@ -315,18 +328,18 @@ async def ai_chat_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if len(response) > 4000:
             for i in range(0, len(response), 4000):
                 if i + 4000 >= len(response):
-                    await update.message.reply_text(
+                    await update.effective_message.reply_text(
                         response[i:],
                         reply_markup=reply_markup,
                         parse_mode="Markdown"
                     )
                 else:
-                    await update.message.reply_text(
+                    await update.effective_message.reply_text(
                         response[i:i+4000],
                         parse_mode="Markdown"
                     )
         else:
-            await update.message.reply_text(
+            await update.effective_message.reply_text(
                 response,
                 reply_markup=reply_markup,
                 parse_mode="Markdown"
@@ -334,8 +347,10 @@ async def ai_chat_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     except Exception as e:
         logger.error("AI chat error: %s", str(e))
-        await update.message.reply_text(
-            "❌ Error processing your request. Please try again."
+        keyboard = [[InlineKeyboardButton("🔄 Try Again", callback_data="retry_ai_chat")]]
+        await update.effective_message.reply_text(
+            "❌ Error processing your request. Please try again.",
+            reply_markup=InlineKeyboardMarkup(keyboard)
         )
 
 
@@ -1001,7 +1016,7 @@ async def faq_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ==================== Register Handlers ====================
 
-application.add_handler(CommandHandler(["start", "strat"], start))
+application.add_handler(CommandHandler("start", start))
 application.add_handler(CommandHandler("help", help_command))
 application.add_handler(CommandHandler("browse", browse_products))
 application.add_handler(CommandHandler("search", search_handler))
@@ -1013,6 +1028,7 @@ application.add_handler(CallbackQueryHandler(show_products, pattern=r"^products_
 application.add_handler(CallbackQueryHandler(search_handler, pattern="^search$"))
 application.add_handler(CallbackQueryHandler(my_order_handler, pattern="^my_order$"))
 application.add_handler(CallbackQueryHandler(ask_ai_callback_handler, pattern="^ask_ai$"))
+application.add_handler(CallbackQueryHandler(ai_chat_handler, pattern="^retry_ai_chat$"))
 application.add_handler(CallbackQueryHandler(reset_ai_chat_handler, pattern="^reset_ai_chat$"))
 application.add_handler(CallbackQueryHandler(view_product, pattern="^product_"))
 application.add_handler(CallbackQueryHandler(show_size_chart_handler, pattern="^size_chart_"))
