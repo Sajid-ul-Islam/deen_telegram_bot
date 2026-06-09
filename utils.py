@@ -1,0 +1,337 @@
+import os
+import time
+import re
+import html
+import logging
+import httpx
+from telegram.helpers import escape_markdown
+from dotenv import load_dotenv
+
+load_dotenv()
+
+# Config
+WOOCOMMERCE_URL = os.getenv("WOOCOMMERCE_URL", "").rstrip("/")
+WOOCOMMERCE_KEY = os.getenv("WOOCOMMERCE_KEY")
+WOOCOMMERCE_SECRET = os.getenv("WOOCOMMERCE_SECRET")
+
+logger = logging.getLogger(__name__)
+
+# Global HTTP client to reuse TCP/TLS connections
+http_client = None
+
+class SimpleCache:
+    def __init__(self, ttl_seconds=3600):
+        self.ttl = ttl_seconds
+        self.store = {}
+
+    def get(self, key):
+        if key in self.store:
+            data, timestamp = self.store[key]
+            if time.time() - timestamp < self.ttl:
+                return data
+            else:
+                del self.store[key]
+        return None
+
+    def set(self, key, value):
+        self.store[key] = (value, time.time())
+
+    def clear(self):
+        self.store.clear()
+
+categories_cache = SimpleCache(ttl_seconds=3600)  # 1 hour
+products_cache = SimpleCache(ttl_seconds=1800)    # 30 minutes
+
+SYNONYMS_MAP = {
+    # Bangla terms
+    "জামা": "shirt",
+    "শার্ট": "shirt",
+    "প্যান্ট": "pants",
+    "পাঞ্জাবি": "panjabi",
+    "মানিব্যাগ": "wallet",
+    "গেঞ্জি": "t-shirt",
+
+    # Banglish terms
+    "jama": "shirt",
+    "shart": "shirt",
+    "shurt": "shirt",
+    "pant": "pants",
+    "pants": "pants",
+    "tshirt": "t-shirt",
+    "t-shirt": "t-shirt",
+    "teeshirt": "t-shirt",
+    "genji": "t-shirt",
+    "panjabi": "panjabi",
+    "punjabi": "panjabi",
+    "wallet": "wallet",
+    "moneybag": "wallet",
+    "bag": "wallet",
+    "polo": "polo",
+    "half sleeve": "half sleeve",
+    "halfshirt": "half sleeve",
+}
+
+def preprocess_search_query(query):
+    if not query:
+        return ""
+    q_clean = query.strip().lower()
+    if q_clean in SYNONYMS_MAP:
+        return SYNONYMS_MAP[q_clean]
+    words = q_clean.split()
+    mapped_words = [SYNONYMS_MAP.get(w, w) for w in words]
+    return " ".join(mapped_words)
+
+def load_pathao_config():
+    config = {}
+    path = "G:/deen_telegram_bot/.env"
+    if not os.path.exists(path):
+        return config
+    try:
+        with open(path, "r") as f:
+            in_section = False
+            for line in f:
+                line_str = line.strip()
+                if not line_str or line_str.startswith("#"):
+                    continue
+                if line_str == "[pathao]":
+                    in_section = True
+                    continue
+                if line_str.startswith("[") and line_str.endswith("]"):
+                    in_section = False
+                    continue
+                if in_section and "=" in line_str:
+                    parts = line_str.split("=", 1)
+                    config[parts[0].strip()] = parts[1].strip().strip('"').strip("'")
+    except Exception as e:
+        logger.error("Failed to parse [pathao] config from .env: %s", str(e))
+    return config
+
+async def get_pathao_tracking_status(consignment_id):
+    try:
+        config = load_pathao_config()
+        base_url = config.get("base_url", "https://api-hermes.pathao.com").rstrip("/")
+        client_id = config.get("client_id")
+        client_secret = config.get("client_secret")
+        username = config.get("username")
+        password = config.get("password")
+
+        if not all([client_id, client_secret, username, password]):
+            return None
+
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            token_resp = await client.post(f"{base_url}/aladdin/api/v1/issue-token", json={
+                "client_id": client_id,
+                "client_secret": client_secret,
+                "username": username,
+                "password": password,
+                "grant_type": "password"
+            })
+            if token_resp.status_code != 200:
+                return None
+
+            token = token_resp.json().get("access_token")
+            headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
+
+            track_resp = await client.get(f"{base_url}/aladdin/api/v1/packages/{consignment_id}/track", headers=headers)
+            if track_resp.status_code != 200:
+                return None
+
+            data = track_resp.json()
+            if data.get("error") and "Unauthorized" in data.get("message", ""):
+                return None
+
+            track_data = data.get("data", {})
+            status = track_data.get("status", "Unknown")
+            history = track_data.get("history", [])
+
+            text = f"📍 *Pathao Courier Status*: {md(status.upper())}\n"
+            if history:
+                text += "*Tracking History*:\n"
+                for h in history[:5]:
+                    time_str = h.get("time", "")
+                    desc = h.get("description", h.get("status", ""))
+                    text += f"  • _{md(time_str)}_: {md(desc)}\n"
+            return text
+    except Exception as e:
+        logger.error("Error fetching Pathao tracking status: %s", str(e))
+        return None
+
+def get_tracking_info(order):
+    if not isinstance(order, dict):
+        return None, None
+    meta_data = order.get("meta_data", [])
+    consignment_id = None
+    provider = None
+
+    for meta in meta_data:
+        key = str(meta.get("key", "")).lower()
+        value = str(meta.get("value", "")).strip()
+        if not value:
+            continue
+
+        if "ptc_consignment_id" in key or "pathao_consignment" in key:
+            consignment_id = value
+            provider = "Pathao"
+            break
+        elif "steadfast_consignment" in key or "steadfast_id" in key:
+            consignment_id = value
+            provider = "Steadfast"
+            break
+        elif "consignment_id" in key or "tracking_number" in key or "tracking_code" in key:
+            consignment_id = value
+            if "pathao" in key or value.upper().startswith("DD"):
+                provider = "Pathao"
+            elif "steadfast" in key:
+                provider = "Steadfast"
+            else:
+                provider = "Courier"
+            break
+
+    if consignment_id:
+        if provider == "Pathao":
+            url = f"https://merchant.pathao.com/tracking?consignment_id={consignment_id}"
+        elif provider == "Steadfast":
+            url = f"https://steadfast.com.bd/t/{consignment_id}"
+        else:
+            if consignment_id.upper().startswith("DD"):
+                url = f"https://merchant.pathao.com/tracking?consignment_id={consignment_id}"
+                provider = "Pathao"
+            else:
+                url = f"https://steadfast.com.bd/t/{consignment_id}"
+                provider = "Steadfast"
+        return consignment_id, url
+    return None, None
+
+def html_table_to_markdown(table_html):
+    rows = re.findall(r'<tr[^>]*>(.*?)</tr>', table_html, re.DOTALL | re.IGNORECASE)
+    md_rows = []
+
+    for row in rows:
+        cells = re.findall(r'<t[dh][^>]*>(.*?)</t[dh]>', row, re.DOTALL | re.IGNORECASE)
+        clean_cells = []
+        for cell in cells:
+            c = re.sub(r'<[^>]+>', '', cell)
+            c = html.unescape(c)
+            c = c.replace('\xa0', ' ').replace('\u200b', '')
+            c = c.strip()
+            clean_cells.append(c)
+        if clean_cells:
+            md_rows.append(clean_cells)
+
+    if not md_rows:
+        return ""
+
+    header_title = ""
+    start_idx = 0
+    if len(md_rows[0]) == 1 and len(md_rows) > 1:
+        header_title = f"📏 *{md_rows[0][0]}*"
+        start_idx = 1
+    elif len(md_rows[0]) == 1:
+        return f"📏 *{md_rows[0][0]}*"
+
+    table_lines = []
+    rows_to_format = md_rows[start_idx:]
+    if not rows_to_format:
+        return header_title
+
+    col_widths = {}
+    for r in rows_to_format:
+        for col_idx, cell in enumerate(r):
+            col_widths[col_idx] = max(col_widths.get(col_idx, 0), len(cell))
+
+    for idx, r in enumerate(rows_to_format):
+        row_str = " | ".join(f"{cell:<{col_widths.get(col_idx, len(cell))}}" for col_idx, cell in enumerate(r))
+        table_lines.append(row_str)
+        if idx == 0:
+            separator = "-+-".join("-" * col_widths.get(col_idx, len(cell)) for col_idx in range(len(r)))
+            table_lines.append(separator)
+
+    table_text = "\n".join(table_lines)
+
+    res = ""
+    if header_title:
+        res += header_title + "\n"
+    res += f"```\n{table_text}\n```"
+    return res
+
+def extract_and_format_size_chart(product):
+    if not isinstance(product, dict):
+        return None
+    for field in ["short_description", "description"]:
+        html_content = product.get(field, "")
+        if not html_content:
+            continue
+        tables = re.findall(r'<table[^>]*>.*?</table>', html_content, re.DOTALL | re.IGNORECASE)
+        for table in tables:
+            if any(x in table.lower() for x in ["size", "chart", "guide", "dimension", "measure"]):
+                return html_table_to_markdown(table)
+    return None
+
+def strip_html_excluding_table(html_content):
+    if not html_content:
+        return ""
+    cleaned = re.sub(r'<table[^>]*>.*?</table>', '', html_content, flags=re.DOTALL | re.IGNORECASE)
+    return strip_html(cleaned)
+
+def md(value):
+    """Escape dynamic values before interpolating into Telegram Markdown."""
+    return escape_markdown("" if value is None else str(value), version=1)
+
+def strip_html(value):
+    text = html.unescape(str(value or ""))
+    text = re.sub(r"<br\s*/?>", "\n", text, flags=re.IGNORECASE)
+    return re.sub(r"<[^>]+>", "", text).strip()
+
+def product_button_name(name):
+    clean_name = str(name or "Product").strip()
+    return clean_name[:32] if clean_name else "Product"
+
+def stock_display(product):
+    stock_status = str(product.get("stock_status") or "").lower()
+    stock_quantity = product.get("stock_quantity")
+    manage_stock = bool(product.get("manage_stock"))
+
+    if stock_status == "instock":
+        status = "✅ In Stock"
+    elif stock_status == "onbackorder":
+        status = "🟡 On Backorder"
+    elif stock_status == "outofstock":
+        status = "❌ Out of Stock"
+    elif product.get("in_stock"):
+        status = "✅ In Stock"
+    else:
+        status = "❌ Out of Stock"
+
+    if manage_stock and stock_quantity is not None:
+        return f"📊 Stock: {md(stock_quantity)} {status}"
+
+    return f"📊 Availability: {status}"
+
+async def woo_get(path, params=None):
+    """Fetch JSON from WooCommerce and normalize API/HTTP failures."""
+    global http_client
+    client_to_use = http_client
+    own_client = False
+    try:
+        if client_to_use is None:
+            client_to_use = httpx.AsyncClient(
+                auth=(WOOCOMMERCE_KEY, WOOCOMMERCE_SECRET),
+                timeout=10.0
+            )
+            own_client = True
+
+        response = await client_to_use.get(
+            f"{WOOCOMMERCE_URL}/wp-json/wc/v3/{path.lstrip('/')}",
+            params=params,
+        )
+        response.raise_for_status()
+        return response.json()
+    except httpx.HTTPStatusError as e:
+        logger.error("WooCommerce API returned %s for %s", e.response.status_code, path)
+        return {"error": f"WooCommerce API returned {e.response.status_code}"}
+    except Exception as e:
+        logger.error("Error fetching WooCommerce path %s: %s", path, str(e))
+        return {"error": str(e)}
+    finally:
+        if own_client and client_to_use:
+            await client_to_use.aclose()
