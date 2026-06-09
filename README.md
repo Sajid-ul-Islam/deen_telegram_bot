@@ -1,3 +1,13 @@
+---
+title: DeenCommerce Telegram Bot
+emoji: 🤖
+colorFrom: blue
+colorTo: indigo
+sdk: docker
+app_port: 8000
+pinned: false
+---
+
 # DeenCommerce Telegram Bot
 
 A simple Telegram bot for your WooCommerce store that allows customers to:
