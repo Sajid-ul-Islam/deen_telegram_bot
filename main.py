@@ -549,6 +549,19 @@ async def startup():
         await application.initialize()
         await application.start()
         logger.info("Telegram application initialized and started.")
+
+        # Auto-register webhook if external URL is provided
+        webhook_base = os.getenv("RENDER_EXTERNAL_URL") or os.getenv("WEBHOOK_URL")
+        if webhook_base:
+            webhook_url = f"{webhook_base.rstrip('/')}/telegram/webhook"
+            logger.info("Auto-registering Telegram webhook: %s", webhook_url)
+            await application.bot.set_webhook(
+                url=webhook_url,
+                secret_token=TELEGRAM_WEBHOOK_SECRET
+            )
+            logger.info("Telegram webhook auto-registered successfully.")
+        else:
+            logger.warning("No RENDER_EXTERNAL_URL or WEBHOOK_URL environment variable found. Webhook was not auto-registered.")
     except Exception as e:
         logger.critical("Failed to initialize Telegram application on startup: %s", str(e))
         raise

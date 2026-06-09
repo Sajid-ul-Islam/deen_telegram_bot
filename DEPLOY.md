@@ -40,15 +40,10 @@ Scroll down to the **Environment** section, click **Add Environment Variable**, 
 ### 4. Create Web Service
 Click **Create Web Service** at the bottom of the page and wait for the deployment to complete.
 
-### 5. Set Telegram Webhook
-After the build succeeds and the service starts, copy your Render app URL (e.g., `https://deen-telegram-bot.onrender.com`).
-Register the webhook with Telegram by sending a POST request (replace placeholders with actual values):
+### 5. Telegram Webhook Registration (Automatic)
+The bot is configured to automatically register the webhook with Telegram on startup using Render's built-in `RENDER_EXTERNAL_URL` environment variable. **No manual curl commands are needed!**
 
-```bash
-curl -X POST "https://api.telegram.org/botYOUR_TELEGRAM_BOT_TOKEN/setWebhook" \
-  -d "url=https://YOUR_RENDER_DOMAIN.onrender.com/telegram/webhook" \
-  -d "secret_token=YOUR_TELEGRAM_WEBHOOK_SECRET"
-```
+Once the deployment finishes and the service starts up, the webhook is automatically configured.
 
 ---
 

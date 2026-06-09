@@ -85,22 +85,11 @@ INFO:     Uvicorn running on http://0.0.0.0:8000
 6. Add the 5 required environment variables (`TELEGRAM_BOT_TOKEN`, `TELEGRAM_WEBHOOK_SECRET`, `WOOCOMMERCE_URL`, `WOOCOMMERCE_KEY`, `WOOCOMMERCE_SECRET`)
 7. Click **Deploy Web Service**
 
-### Step 7: Set Telegram Webhook
+### Step 7: Telegram Webhook Registration (Automatic)
 
-After deployment, replace `YOUR_DOMAIN` with your actual Render URL (e.g., `your-app.onrender.com`):
+The bot will automatically register the webhook with Telegram on startup using Render's built-in `RENDER_EXTERNAL_URL` environment variable. **No manual setup or curl commands are required!**
 
-```bash
-curl -X POST "https://api.telegram.org/bot{YOUR_BOT_TOKEN}/setWebhook" \
-  -d "url=https://YOUR_DOMAIN.com/telegram/webhook" \
-  -d "secret_token={TELEGRAM_WEBHOOK_SECRET}"
-```
-
-Example:
-```bash
-curl -X POST "https://api.telegram.org/bot123456789:ABCDEFGHijklmnopqrstuvwxyz/setWebhook" \
-  -d "url=https://deen-telegram-bot.onrender.com/telegram/webhook" \
-  -d "secret_token=change_this_to_a_long_random_string"
-```
+Once the deployment finishes and the service starts up, the webhook is automatically configured.
 
 ---
 
