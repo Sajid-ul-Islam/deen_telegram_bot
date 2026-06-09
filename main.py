@@ -63,7 +63,7 @@ application = Application.builder().token(TELEGRAM_BOT_TOKEN).updater(None).buil
 
 def md(value):
     """Escape dynamic values before interpolating into Telegram Markdown."""
-    return escape_markdown(str(value or ""), version=1)
+    return escape_markdown("" if value is None else str(value), version=1)
 
 
 def strip_html(value):
@@ -77,15 +77,38 @@ def product_button_name(name):
     return clean_name[:32] if clean_name else "Product"
 
 
+def stock_display(product):
+    stock_status = str(product.get("stock_status") or "").lower()
+    stock_quantity = product.get("stock_quantity")
+    manage_stock = bool(product.get("manage_stock"))
+
+    if stock_status == "instock":
+        status = "✅ In Stock"
+    elif stock_status == "onbackorder":
+        status = "🟡 On Backorder"
+    elif stock_status == "outofstock":
+        status = "❌ Out of Stock"
+    elif product.get("in_stock"):
+        status = "✅ In Stock"
+    else:
+        status = "❌ Out of Stock"
+
+    if manage_stock and stock_quantity is not None:
+        return f"📊 Stock: {md(stock_quantity)} {status}"
+
+    return f"📊 Availability: {status}"
+
+
 def main_menu():
     keyboard = [
-        [InlineKeyboardButton("👔 Browse Products", callback_data="browse")],
+        [InlineKeyboardButton("👔 Categories", callback_data="browse")],
+        [InlineKeyboardButton("🆕 Latest Products", callback_data="products_all_1")],
         [InlineKeyboardButton("🔍 Search", callback_data="search")],
         [InlineKeyboardButton("📦 My Order", callback_data="my_order")],
     ]
     text = (
         "🎉 *Welcome to DeenCommerce!*\n\n"
-        "Browse our fashion collection, check stock, and view a specific order."
+        "Browse by category, check stock, and view a specific order."
     )
     return text, InlineKeyboardMarkup(keyboard)
 
@@ -117,6 +140,36 @@ async def get_all_products(limit=20):
     return await woo_get(
         "products",
         params={"per_page": limit, "orderby": "date", "order": "desc"},
+    )
+
+
+async def get_categories(limit=50):
+    """Fetch product categories that have products."""
+    return await woo_get(
+        "products/categories",
+        params={"per_page": limit, "orderby": "name", "order": "asc", "hide_empty": True},
+    )
+
+
+async def get_products_by_category(category_id, page=1, limit=8):
+    """Fetch products from a category."""
+    return await woo_get(
+        "products",
+        params={
+            "category": category_id,
+            "page": page,
+            "per_page": limit,
+            "orderby": "date",
+            "order": "desc",
+        },
+    )
+
+
+async def get_products_page(page=1, limit=8):
+    """Fetch a page of latest products."""
+    return await woo_get(
+        "products",
+        params={"page": page, "per_page": limit, "orderby": "date", "order": "desc"},
     )
 
 
@@ -157,32 +210,89 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def browse_products(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Show featured products."""
+    """Show product categories."""
     query = update.callback_query
     await query.answer()
 
     try:
-        products = await get_all_products(limit=5)
+        categories = await get_categories()
+
+        if isinstance(categories, dict) and "error" in categories:
+            await query.edit_message_text(text=f"❌ Error: {md(categories['error'])}", parse_mode="Markdown")
+            return
+
+        if not isinstance(categories, list) or not categories:
+            await query.edit_message_text(text="No categories found.")
+            return
+
+        text = "👔 *Select a Category*\n\n"
+        keyboard = []
+
+        for category in categories[:20]:
+            name = category.get("name", "Category")
+            count = category.get("count", 0)
+            keyboard.append(
+                [
+                    InlineKeyboardButton(
+                        f"{name[:28]} ({count})",
+                        callback_data=f"cat_{category['id']}_1",
+                    )
+                ]
+            )
+
+        keyboard.append([InlineKeyboardButton("🆕 All Latest Products", callback_data="products_all_1")])
+        keyboard.append([InlineKeyboardButton("← Back", callback_data="start_menu")])
+        reply_markup = InlineKeyboardMarkup(keyboard)
+
+        await query.edit_message_text(text=text, reply_markup=reply_markup, parse_mode="Markdown")
+
+    except Exception as e:
+        logger.error("Error in browse_products: %s", str(e))
+        await query.edit_message_text(text=f"❌ Error: {md(e)}", parse_mode="Markdown")
+
+
+async def show_products(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show a page of products, optionally filtered by category."""
+    query = update.callback_query
+    await query.answer()
+
+    parts = query.data.split("_")
+    is_category = parts[0] == "cat"
+    category_id = parts[1] if is_category else None
+    page = int(parts[2] if is_category else parts[2])
+    limit = 8
+
+    try:
+        if is_category:
+            products = await get_products_by_category(category_id, page=page, limit=limit)
+            title = "📦 *Category Products*"
+            back_callback = "browse"
+            page_prefix = f"cat_{category_id}"
+        else:
+            products = await get_products_page(page=page, limit=limit)
+            title = "🆕 *Latest Products*"
+            back_callback = "start_menu"
+            page_prefix = "products_all"
 
         if isinstance(products, dict) and "error" in products:
             await query.edit_message_text(text=f"❌ Error: {md(products['error'])}", parse_mode="Markdown")
             return
 
         if not isinstance(products, list) or not products:
-            await query.edit_message_text(text="No products found.")
+            keyboard = [[InlineKeyboardButton("← Back", callback_data=back_callback)]]
+            await query.edit_message_text(
+                text="No products found.",
+                reply_markup=InlineKeyboardMarkup(keyboard),
+            )
             return
 
-        text = "📦 *Latest Products*\n\n"
+        text = f"{title}\nPage {page}\n\n"
         keyboard = []
 
-        for product in products[:5]:
-            stock = product.get("stock_quantity")
-            stock_text = stock if stock is not None else "N/A"
-            status = "✅ In Stock" if product.get("in_stock") else "❌ Out of Stock"
-
+        for product in products:
             text += f"*{md(product.get('name', 'Product'))}*\n"
             text += f"💰 ৳{md(product.get('price', ''))}\n"
-            text += f"📊 Stock: {md(stock_text)} {status}\n\n"
+            text += f"{stock_display(product)}\n\n"
 
             keyboard.append(
                 [
@@ -193,13 +303,21 @@ async def browse_products(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 ]
             )
 
-        keyboard.append([InlineKeyboardButton("← Back", callback_data="start_menu")])
+        nav_row = []
+        if page > 1:
+            nav_row.append(InlineKeyboardButton("← Prev", callback_data=f"{page_prefix}_{page - 1}"))
+        if len(products) == limit:
+            nav_row.append(InlineKeyboardButton("Next →", callback_data=f"{page_prefix}_{page + 1}"))
+        if nav_row:
+            keyboard.append(nav_row)
+
+        keyboard.append([InlineKeyboardButton("← Back", callback_data=back_callback)])
         reply_markup = InlineKeyboardMarkup(keyboard)
 
         await query.edit_message_text(text=text, reply_markup=reply_markup, parse_mode="Markdown")
 
     except Exception as e:
-        logger.error("Error in browse_products: %s", str(e))
+        logger.error("Error in show_products: %s", str(e))
         await query.edit_message_text(text=f"❌ Error: {md(e)}", parse_mode="Markdown")
 
 
@@ -217,13 +335,9 @@ async def view_product(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text(text=f"❌ Error: {md(product['error'])}", parse_mode="Markdown")
             return
 
-        stock = product.get("stock_quantity")
-        stock_text = stock if stock is not None else "N/A"
-        status = "✅ In Stock" if product.get("in_stock") else "❌ Out of Stock"
-
         text = f"*{md(product.get('name', 'Product'))}*\n\n"
         text += f"💰 Price: ৳{md(product.get('price', ''))}\n"
-        text += f"📊 Stock: {md(stock_text)} {status}\n\n"
+        text += f"{stock_display(product)}\n\n"
 
         desc_clean = strip_html(product.get("description", "No description"))
         if desc_clean:
@@ -285,11 +399,9 @@ async def search_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         keyboard = []
 
         for product in products[:5]:
-            stock = product.get("stock_quantity")
-            stock_text = stock if stock is not None else "N/A"
             text += f"*{md(product.get('name', 'Product'))}*\n"
             text += f"💰 ৳{md(product.get('price', ''))}\n"
-            text += f"📊 Stock: {md(stock_text)}\n\n"
+            text += f"{stock_display(product)}\n\n"
 
             keyboard.append(
                 [
@@ -418,6 +530,8 @@ async def back_to_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 application.add_handler(CommandHandler("start", start))
 application.add_handler(CallbackQueryHandler(browse_products, pattern="^browse$"))
+application.add_handler(CallbackQueryHandler(show_products, pattern=r"^cat_\d+_\d+$"))
+application.add_handler(CallbackQueryHandler(show_products, pattern=r"^products_all_\d+$"))
 application.add_handler(CallbackQueryHandler(search_handler, pattern="^search$"))
 application.add_handler(CallbackQueryHandler(my_order_handler, pattern="^my_order$"))
 application.add_handler(CallbackQueryHandler(view_product, pattern="^product_"))

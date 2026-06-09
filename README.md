@@ -19,6 +19,7 @@ A simple Telegram bot for your WooCommerce store that allows customers to:
 - No database required
 - Direct integration with WooCommerce REST API
 - Real-time product and order data
+- Product category browsing with paginated product lists
 - Support for Bangla text (৳ Taka currency)
 
 ---
@@ -131,7 +132,8 @@ curl -X POST "https://api.telegram.org/bot123456789:ABCDEFGHijklmnopqrstuvwxyz/s
 1. Find your bot on Telegram (search for username you set with BotFather)
 2. Start the bot: `/start`
 3. Test features:
-   - Click "Browse Products"
+   - Click "Categories"
+   - Select a category and page through products
    - Click "Search" and type a product name
    - Click "My Order" and enter your order number plus billing email
 
@@ -140,9 +142,10 @@ curl -X POST "https://api.telegram.org/bot123456789:ABCDEFGHijklmnopqrstuvwxyz/s
 ## Bot Features
 
 ### 📦 Browse Products
-- Shows latest 5 products from WooCommerce
+- Shows WooCommerce product categories
+- Shows products by selected category with next/previous paging
 - Displays price in ৳ (Taka)
-- Shows stock count
+- Shows real WooCommerce availability, and stock count when WooCommerce tracks product quantity
 - Click to view full product details with image
 
 ### 🔍 Search
@@ -169,6 +172,11 @@ curl -X POST "https://api.telegram.org/bot123456789:ABCDEFGHijklmnopqrstuvwxyz/s
 - Verify WooCommerce API key is correct
 - Check WooCommerce REST API is enabled
 - Ensure products are published
+
+### Stock looks wrong
+- If WooCommerce does not manage stock quantity for a product, the bot shows availability instead of a number
+- Enable **Manage stock** on the WooCommerce product if you want the bot to show the exact quantity
+- For variable products, make sure stock is configured on the product or its variations
 
 ### "No matching order found"
 - Customer must enter the exact order number and billing email
