@@ -1,7 +1,15 @@
 import json
+import os
 from anthropic import Anthropic
+from dotenv import load_dotenv
 import httpx
 from datetime import datetime
+
+load_dotenv()
+
+WOOCOMMERCE_URL = os.getenv("WOOCOMMERCE_URL", "").rstrip("/")
+WOOCOMMERCE_KEY = os.getenv("WOOCOMMERCE_KEY")
+WOOCOMMERCE_SECRET = os.getenv("WOOCOMMERCE_SECRET")
 
 client = Anthropic()
 
