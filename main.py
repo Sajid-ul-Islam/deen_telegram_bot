@@ -1,3 +1,4 @@
+from contextlib import asynccontextmanager
 import html
 import logging
 import os
@@ -19,7 +20,10 @@ from telegram.ext import (
 )
 
 # Setup logging
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+)
 logger = logging.getLogger(__name__)
 
 # Force IPv4 resolution globally (resolves Hugging Face IPv6 DNS/routing issues)
@@ -35,8 +39,6 @@ def patched_getaddrinfo(host, port, family=0, type=0, proto=0, flags=0):
 socket.getaddrinfo = patched_getaddrinfo
 
 load_dotenv()
-
-app = FastAPI()
 
 # Config
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
@@ -60,6 +62,53 @@ application = Application.builder().token(TELEGRAM_BOT_TOKEN).updater(None).buil
 
 # Global HTTP client to reuse TCP/TLS connections
 http_client = None
+
+
+@asynccontextmanager
+async def lifespan(fastapi_app: FastAPI):
+    """Lifecycle events for FastAPI application."""
+    logger.info("Initializing Telegram application...")
+    try:
+        # Initialize global HTTP client
+        global http_client
+        http_client = httpx.AsyncClient(
+            auth=(WOOCOMMERCE_KEY, WOOCOMMERCE_SECRET),
+            timeout=10.0
+        )
+
+        await application.initialize()
+        await application.start()
+        logger.info("Telegram application initialized and started.")
+
+        # Auto-register webhook if external URL is provided
+        webhook_base = os.getenv("RENDER_EXTERNAL_URL") or os.getenv("WEBHOOK_URL")
+        if webhook_base:
+            webhook_url = f"{webhook_base.rstrip('/')}/telegram/webhook"
+            logger.info("Auto-registering Telegram webhook: %s", webhook_url)
+            await application.bot.set_webhook(
+                url=webhook_url,
+                secret_token=TELEGRAM_WEBHOOK_SECRET
+            )
+            logger.info("Telegram webhook auto-registered successfully.")
+        else:
+            logger.warning("No RENDER_EXTERNAL_URL or WEBHOOK_URL environment variable found. Webhook was not auto-registered.")
+    except Exception as e:
+        logger.critical("Failed to initialize Telegram application on startup: %s", str(e))
+        raise
+
+    yield
+
+    logger.info("Shutting down Telegram application...")
+    if application.running:
+        await application.stop()
+    await application.shutdown()
+
+    # Close global HTTP client
+    if http_client:
+        await http_client.aclose()
+
+
+app = FastAPI(lifespan=lifespan)
 
 
 # ==================== Formatting Helpers ====================
@@ -224,25 +273,38 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def browse_products(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Show product categories."""
+    """Show product categories (handles both callback query and direct command)."""
     query = update.callback_query
-    await query.answer()
+    if query:
+        await query.answer()
 
     try:
         categories = await get_categories()
 
         if isinstance(categories, dict) and "error" in categories:
-            await query.edit_message_text(text=f"❌ Error: {md(categories['error'])}", parse_mode="Markdown")
+            error_text = f"❌ Error: {md(categories['error'])}"
+            if query:
+                await query.edit_message_text(text=error_text, parse_mode="Markdown")
+            else:
+                await update.effective_message.reply_text(text=error_text, parse_mode="Markdown")
             return
 
         if not isinstance(categories, list) or not categories:
-            await query.edit_message_text(text="No categories found.")
+            no_cat_text = "No categories found."
+            if query:
+                await query.edit_message_text(text=no_cat_text)
+            else:
+                await update.effective_message.reply_text(text=no_cat_text)
             return
+
+        # Filter: Top-level categories only and sort by menu_order
+        top_categories = [c for c in categories if c.get("parent") == 0]
+        top_categories.sort(key=lambda c: c.get("menu_order", 0))
 
         text = "👔 *Select a Category*\n\n"
         keyboard = []
 
-        for category in categories[:20]:
+        for category in top_categories[:20]:
             name = category.get("name", "Category")
             count = category.get("count", 0)
             keyboard.append(
@@ -258,11 +320,18 @@ async def browse_products(update: Update, context: ContextTypes.DEFAULT_TYPE):
         keyboard.append([InlineKeyboardButton("← Back", callback_data="start_menu")])
         reply_markup = InlineKeyboardMarkup(keyboard)
 
-        await query.edit_message_text(text=text, reply_markup=reply_markup, parse_mode="Markdown")
+        if query:
+            await query.edit_message_text(text=text, reply_markup=reply_markup, parse_mode="Markdown")
+        else:
+            await update.effective_message.reply_text(text=text, reply_markup=reply_markup, parse_mode="Markdown")
 
     except Exception as e:
         logger.error("Error in browse_products: %s", str(e))
-        await query.edit_message_text(text=f"❌ Error: {md(e)}", parse_mode="Markdown")
+        error_text = f"❌ Error: {md(e)}"
+        if query:
+            await query.edit_message_text(text=error_text, parse_mode="Markdown")
+        else:
+            await update.effective_message.reply_text(text=error_text, parse_mode="Markdown")
 
 
 async def show_products(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -273,7 +342,7 @@ async def show_products(update: Update, context: ContextTypes.DEFAULT_TYPE):
     parts = query.data.split("_")
     is_category = parts[0] == "cat"
     category_id = parts[1] if is_category else None
-    page = int(parts[2] if is_category else parts[2])
+    page = int(parts[2])
     limit = 8
 
     try:
@@ -365,11 +434,12 @@ async def view_product(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         await query.edit_message_text(text=text, reply_markup=reply_markup, parse_mode="Markdown")
 
-        if product.get("images"):
+        images = product.get("images")
+        if isinstance(images, list) and len(images) > 0:
             try:
                 await context.bot.send_photo(
                     chat_id=update.effective_chat.id,
-                    photo=product["images"][0]["src"],
+                    photo=images[0]["src"],
                     caption=f"_{md(product.get('name', 'Product'))}_",
                     parse_mode="Markdown",
                 )
@@ -382,7 +452,7 @@ async def view_product(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def search_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle search command."""
+    """Handle search command (via button click or direct /search command)."""
     query = update.callback_query
 
     if query:
@@ -395,8 +465,23 @@ async def search_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data.pop("waiting_for_order_lookup", None)
         return
 
-    search_term = update.message.text.strip()
-    context.user_data["waiting_for_search"] = False
+    # Check if triggered by command '/search <term>'
+    message_text = update.message.text
+    if message_text.startswith("/"):
+        parts = message_text.split(maxsplit=1)
+        if len(parts) > 1:
+            search_term = parts[1].strip()
+        else:
+            await update.message.reply_text(
+                text="🔍 *Search Products*\n\nType a product name, for example: shirt, jeans, dress.",
+                parse_mode="Markdown",
+            )
+            context.user_data["waiting_for_search"] = True
+            context.user_data.pop("waiting_for_order_lookup", None)
+            return
+    else:
+        search_term = message_text.strip()
+        context.user_data["waiting_for_search"] = False
 
     try:
         products = await search_products(search_term)
@@ -406,7 +491,7 @@ async def search_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         if not products:
-            await update.message.reply_text(f"❌ No products found for '{search_term}'")
+            await update.message.reply_text(f"❌ No products found for '{md(search_term)}'", parse_mode="Markdown")
             return
 
         text = f"🔍 *Search Results for '{md(search_term)}'*\n\n"
@@ -540,9 +625,102 @@ async def back_to_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await start(update, context)
 
 
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Help command - displays FAQ options."""
+    context.user_data.clear()
+
+    text = (
+        "🤖 *DEEN Commerce Customer Care*\n\n"
+        "Welcome! How can we assist you today? Please choose a topic below:\n\n"
+        "💳 *Payment*: bKash, Nagad, or Cash on Delivery.\n"
+        "🚚 *Shipping*: Dhaka: 24-48h (৳80), Outside Dhaka: 3-5 days (৳150).\n"
+        "🔄 *Exchange*: Exchange within 7 days for sizing issues.\n"
+        "📞 *Live Agent*: Direct support contact info."
+    )
+    keyboard = [
+        [InlineKeyboardButton("💳 Payment Info", callback_data="faq_payment")],
+        [InlineKeyboardButton("🚚 Delivery & Shipping", callback_data="faq_shipping")],
+        [InlineKeyboardButton("🔄 Return & Exchange", callback_data="faq_returns")],
+        [InlineKeyboardButton("📞 Contact Support", callback_data="faq_support")],
+        [InlineKeyboardButton("← Main Menu", callback_data="start_menu")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    query = update.callback_query
+    if query:
+        await query.answer()
+        await query.edit_message_text(
+            text=text,
+            reply_markup=reply_markup,
+            parse_mode="Markdown"
+        )
+        return
+
+    await update.effective_message.reply_text(
+        text,
+        reply_markup=reply_markup,
+        parse_mode="Markdown"
+    )
+
+
+async def faq_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle FAQ sub-menus."""
+    query = update.callback_query
+    await query.answer()
+
+    faq_type = query.data
+    keyboard = [[InlineKeyboardButton("← Back to Support", callback_data="help_menu")]]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    if faq_type == "faq_payment":
+        text = (
+            "💳 *Payment Methods*\n\n"
+            "1. *Cash on Delivery (COD)*:\n"
+            "   Available all over Bangladesh. Pay only after receiving the product.\n\n"
+            "2. *Mobile Financial Services (MFS)*:\n"
+            "   Prepay securely using *bKash* or *Nagad* during checkout or via direct transfer.\n\n"
+            "⚠️ *Important Note*: We do not charge any extra fees for MFS payments."
+        )
+    elif faq_type == "faq_shipping":
+        text = (
+            "🚚 *Delivery Details*\n\n"
+            "• *Inside Dhaka*: 24 to 48 Hours. Delivery Fee: *৳80*.\n"
+            "• *Outside Dhaka*: 3 to 5 Days (via Pathao / Steadfast). Delivery Fee: *৳150*.\n\n"
+            "📦 You will receive a tracking link via SMS once your parcel is dispatched."
+        )
+    elif faq_type == "faq_returns":
+        text = (
+            "🔄 *Return & Exchange Policy*\n\n"
+            "• You can request an exchange or return within *7 days* of receiving your package.\n"
+            "• The item must be unused, unwashed, and with original tags intact.\n"
+            "• Sizing exchanges are free (only delivery charge applies for sending back)."
+        )
+    elif faq_type == "faq_support":
+        text = (
+            "📞 *Contact DEEN Commerce Support*\n\n"
+            "Need to talk to a human agent? We are here to help!\n\n"
+            "💬 *Messenger*: [Click here to message us](https://m.me/deencommerce)\n"
+            "🟢 *WhatsApp*: `+8801700000000` (Mock/Placeholder number)\n"
+            "📞 *Hotline*: `+8809612345678` (10:00 AM - 8:00 PM)\n"
+            "✉️ *Email*: `support@deencommerce.com`"
+        )
+    else:
+        text = "Topic not found."
+
+    await query.edit_message_text(
+        text=text,
+        reply_markup=reply_markup,
+        parse_mode="Markdown",
+        disable_web_page_preview=True
+    )
+
+
 # ==================== Register Handlers ====================
 
 application.add_handler(CommandHandler(["start", "strat"], start))
+application.add_handler(CommandHandler("help", help_command))
+application.add_handler(CommandHandler("browse", browse_products))
+application.add_handler(CommandHandler("search", search_handler))
 application.add_handler(CallbackQueryHandler(browse_products, pattern="^browse$"))
 application.add_handler(CallbackQueryHandler(show_products, pattern=r"^cat_\d+_\d+$"))
 application.add_handler(CallbackQueryHandler(show_products, pattern=r"^products_all_\d+$"))
@@ -550,56 +728,12 @@ application.add_handler(CallbackQueryHandler(search_handler, pattern="^search$")
 application.add_handler(CallbackQueryHandler(my_order_handler, pattern="^my_order$"))
 application.add_handler(CallbackQueryHandler(view_product, pattern="^product_"))
 application.add_handler(CallbackQueryHandler(back_to_menu, pattern="^start_menu$"))
+application.add_handler(CallbackQueryHandler(help_command, pattern="^help_menu$"))
+application.add_handler(CallbackQueryHandler(faq_handler, pattern="^faq_"))
 application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_input))
 
 
 # ==================== FastAPI Routes ====================
-
-@app.on_event("startup")
-async def startup():
-    """Initialize and start the Telegram application."""
-    logger.info("Initializing Telegram application...")
-    try:
-        # Initialize global HTTP client
-        global http_client
-        http_client = httpx.AsyncClient(
-            auth=(WOOCOMMERCE_KEY, WOOCOMMERCE_SECRET),
-            timeout=10.0
-        )
-
-        await application.initialize()
-        await application.start()
-        logger.info("Telegram application initialized and started.")
-
-        # Auto-register webhook if external URL is provided
-        webhook_base = os.getenv("RENDER_EXTERNAL_URL") or os.getenv("WEBHOOK_URL")
-        if webhook_base:
-            webhook_url = f"{webhook_base.rstrip('/')}/telegram/webhook"
-            logger.info("Auto-registering Telegram webhook: %s", webhook_url)
-            await application.bot.set_webhook(
-                url=webhook_url,
-                secret_token=TELEGRAM_WEBHOOK_SECRET
-            )
-            logger.info("Telegram webhook auto-registered successfully.")
-        else:
-            logger.warning("No RENDER_EXTERNAL_URL or WEBHOOK_URL environment variable found. Webhook was not auto-registered.")
-    except Exception as e:
-        logger.critical("Failed to initialize Telegram application on startup: %s", str(e))
-        raise
-
-
-@app.on_event("shutdown")
-async def shutdown():
-    """Clean up on shutdown."""
-    logger.info("Shutting down Telegram application...")
-    if application.running:
-        await application.stop()
-    await application.shutdown()
-
-    # Close global HTTP client
-    global http_client
-    if http_client:
-        await http_client.aclose()
 
 
 @app.post("/telegram/webhook")

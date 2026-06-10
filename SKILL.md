@@ -5,6 +5,15 @@ description: Work on the DeenCommerce Telegram bot, a Python FastAPI webhook app
 
 # DeenCommerce Telegram Bot
 
+```mermaid
+graph TD
+    Telegram[Telegram API] -->|Webhook POST /telegram/webhook| FastAPI[FastAPI App]
+    FastAPI -->|Processes Updates| PTB[Python Telegram Bot Application]
+    PTB -->|WooCommerce REST API| Woo[WooCommerce API /wp-json/wc/v3/]
+    PTB -->|Sends Messages/Photos| Telegram
+```
+
+
 ## Workflow
 
 1. Read `main.py` first. Most application behavior lives in this single file.
@@ -22,7 +31,7 @@ description: Work on the DeenCommerce Telegram bot, a Python FastAPI webhook app
 
 ## WooCommerce Rules
 
-- Product categories come from `products/categories`.
+- Product categories come from `products/categories`. Filter to top-level categories only (`parent == 0`) and sort by `menu_order`.
 - Category product lists use the `category` query parameter on `products`.
 - Stock display must prefer `stock_status`.
 - Show exact quantity only when `manage_stock` is true and `stock_quantity` is not null.
@@ -34,3 +43,4 @@ description: Work on the DeenCommerce Telegram bot, a Python FastAPI webhook app
 - Use paginated lists for products to avoid Telegram message length and button limits.
 - Add a Back button on every submenu.
 - Clear pending user input state when returning to the main menu.
+- Support commands `/start`, `/help` (FAQ support options), `/browse` (top-level categories), and `/search` (direct/prompted product searches).
