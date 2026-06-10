@@ -153,16 +153,18 @@ def stock_display(product):
     return f"📊 Availability: {status}"
 
 
-def main_menu():
+def main_menu(first_name=None):
     keyboard = [
         [InlineKeyboardButton("👔 Categories", callback_data="browse")],
         [InlineKeyboardButton("🆕 Latest Products", callback_data="products_all_1")],
         [InlineKeyboardButton("🔍 Search", callback_data="search")],
         [InlineKeyboardButton("📦 My Order", callback_data="my_order")],
+        [InlineKeyboardButton("🤖 Ask AI Agent", callback_data="ask_ai")],
     ]
+    greeting = f"Assalamu Alaikum {md(first_name)}" if first_name else "Assalamu Alaikum"
     text = (
-        "🎉 *Welcome to DeenCommerce!*\n\n"
-        "Browse by category, check stock, and view a specific order."
+        f"🎉 *{greeting}! Welcome to DeenCommerce!*\n\n"
+        "Browse by category, check stock, view a specific order, or ask our AI assistant."
     )
     return text, InlineKeyboardMarkup(keyboard)
 
@@ -829,12 +831,41 @@ async def ask_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         update.message.text = original_text
 
 
+async def ask_ai_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Callback when user clicks 'Ask AI Agent' from the main menu."""
+    query = update.callback_query
+    await query.answer()
+
+    # Clear other states
+    context.user_data.pop("waiting_for_search", None)
+    context.user_data.pop("waiting_for_order_lookup", None)
+
+    text = (
+        "🤖 *Ask AI Agent*\n\n"
+        "Ask me anything about our products, categories, or recommendations!\n\n"
+        "Examples:\n"
+        "• _What blue shirts do you have?_\n"
+        "• _Recommend some trendy clothes._\n"
+        "• _Do you have jeans in stock?_\n\n"
+        "Just type your question below 👇"
+    )
+    keyboard = [[InlineKeyboardButton("← Back", callback_data="start_menu")]]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    await query.edit_message_text(
+        text=text,
+        reply_markup=reply_markup,
+        parse_mode="Markdown"
+    )
+
+
 # ==================== Telegram Handlers ====================
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Start command - main menu."""
     context.user_data.clear()
-    text, reply_markup = main_menu()
+    first_name = update.effective_user.first_name if update.effective_user else None
+    text, reply_markup = main_menu(first_name)
 
     if update.callback_query:
         await update.callback_query.edit_message_text(
@@ -1368,6 +1399,7 @@ application.add_handler(CallbackQueryHandler(show_products, pattern=r"^cat_\d+_\
 application.add_handler(CallbackQueryHandler(show_products, pattern=r"^products_all_\d+$"))
 application.add_handler(CallbackQueryHandler(search_handler, pattern="^search$"))
 application.add_handler(CallbackQueryHandler(my_order_handler, pattern="^my_order$"))
+application.add_handler(CallbackQueryHandler(ask_ai_callback_handler, pattern="^ask_ai$"))
 application.add_handler(CallbackQueryHandler(view_product, pattern="^product_"))
 application.add_handler(CallbackQueryHandler(back_to_menu, pattern="^start_menu$"))
 application.add_handler(CallbackQueryHandler(help_command, pattern="^help_menu$"))
