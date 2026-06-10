@@ -886,16 +886,33 @@ async def ai_chat_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Process message with RAG agent
         response = await user_agents[user_id].process_message(user_message, user_id)
 
+        # Attach continuous chat options to the final response
+        keyboard = [
+            [
+                InlineKeyboardButton("🗑️ Reset Chat", callback_data="reset_ai_chat"),
+                InlineKeyboardButton("← Back to Menu", callback_data="start_menu")
+            ]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+
         # Split long responses (Telegram has 4096 char limit)
         if len(response) > 4000:
             for i in range(0, len(response), 4000):
-                await update.message.reply_text(
-                    response[i:i+4000],
-                    parse_mode="Markdown"
-                )
+                if i + 4000 >= len(response):
+                    await update.message.reply_text(
+                        response[i:],
+                        reply_markup=reply_markup,
+                        parse_mode="Markdown"
+                    )
+                else:
+                    await update.message.reply_text(
+                        response[i:i+4000],
+                        parse_mode="Markdown"
+                    )
         else:
             await update.message.reply_text(
                 response,
+                reply_markup=reply_markup,
                 parse_mode="Markdown"
             )
 
@@ -947,6 +964,29 @@ async def ask_ai_callback_handler(update: Update, context: ContextTypes.DEFAULT_
         "Just type your question below 👇"
     )
     keyboard = [[InlineKeyboardButton("← Back", callback_data="start_menu")]]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    await query.edit_message_text(
+        text=text,
+        reply_markup=reply_markup,
+        parse_mode="Markdown"
+    )
+
+
+async def reset_ai_chat_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Reset the AI chat history for the user."""
+    query = update.callback_query
+    await query.answer()
+
+    user_id = update.effective_user.id
+    if user_id in user_agents:
+        user_agents[user_id].conversation_history = []
+
+    text = (
+        "🗑️ *AI Chat Reset Successful!*\n\n"
+        "Your previous conversation history has been cleared. Ask me a new question!"
+    )
+    keyboard = [[InlineKeyboardButton("← Back to Menu", callback_data="start_menu")]]
     reply_markup = InlineKeyboardMarkup(keyboard)
 
     await query.edit_message_text(
@@ -1516,6 +1556,7 @@ application.add_handler(CallbackQueryHandler(show_products, pattern=r"^products_
 application.add_handler(CallbackQueryHandler(search_handler, pattern="^search$"))
 application.add_handler(CallbackQueryHandler(my_order_handler, pattern="^my_order$"))
 application.add_handler(CallbackQueryHandler(ask_ai_callback_handler, pattern="^ask_ai$"))
+application.add_handler(CallbackQueryHandler(reset_ai_chat_handler, pattern="^reset_ai_chat$"))
 application.add_handler(CallbackQueryHandler(view_product, pattern="^product_"))
 application.add_handler(CallbackQueryHandler(back_to_menu, pattern="^start_menu$"))
 application.add_handler(CallbackQueryHandler(help_command, pattern="^help_menu$"))
