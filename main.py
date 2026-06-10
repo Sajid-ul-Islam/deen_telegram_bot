@@ -524,42 +524,57 @@ async def search_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def my_order_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Prompt user for a single order lookup."""
     query = update.callback_query
+    text = (
+        "📦 *View Your Order*\n\n"
+        "Enter your order number and billing email or phone in one message:\n"
+        "`1234 customer@example.com`\n"
+        "or\n"
+        "`1234 01700000000`"
+    )
+
+    context.user_data["waiting_for_order_lookup"] = True
+    context.user_data.pop("waiting_for_search", None)
 
     if query:
         await query.answer()
         await query.edit_message_text(
-            text=(
-                "📦 *View Your Order*\n\n"
-                "Enter your order number and billing email in one message:\n"
-                "`1234 customer@example.com`"
-            ),
+            text=text,
             parse_mode="Markdown",
         )
-        context.user_data["waiting_for_order_lookup"] = True
-        context.user_data.pop("waiting_for_search", None)
+    else:
+        await update.effective_message.reply_text(
+            text=text,
+            parse_mode="Markdown",
+        )
 
 
 def parse_order_lookup(user_text):
-    match = re.match(r"^\s*#?(\d+)\s+([^\s@]+@[^\s@]+\.[^\s@]+)\s*$", user_text)
+    if not user_text:
+        return None, None
+    match = re.match(r"^\s*#?(\d+)\s+([^\s]+)\s*$", user_text)
     if not match:
         return None, None
-    return match.group(1), match.group(2).lower()
+    return match.group(1), match.group(2)
 
 
 async def handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle text input for search or order lookup."""
     user_text = update.message.text
+    if not user_text:
+        return
 
     if context.user_data.get("waiting_for_search"):
         await search_handler(update, context)
         return
 
     if context.user_data.get("waiting_for_order_lookup"):
-        order_id, customer_email = parse_order_lookup(user_text)
+        order_id, contact_info = parse_order_lookup(user_text)
         if not order_id:
             await update.message.reply_text(
-                "Please send the order number and billing email like this:\n"
-                "`1234 customer@example.com`",
+                "Please send the order number and billing email or phone like this:\n"
+                "`1234 customer@example.com`\n"
+                "or\n"
+                "`1234 01700000000`",
                 parse_mode="Markdown",
             )
             return
@@ -573,13 +588,20 @@ async def handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await update.message.reply_text("❌ No matching order found.")
                 return
 
-            billing_email = (
-                order.get("billing", {})
-                .get("email", "")
-                .strip()
-                .lower()
-            )
-            if billing_email != customer_email:
+            billing_email = order.get("billing", {}).get("email", "").strip().lower()
+            billing_phone = re.sub(r"[^\d\+]", "", order.get("billing", {}).get("phone", ""))
+            
+            clean_input = contact_info.strip().lower()
+            clean_input_phone = re.sub(r"[^\d\+]", "", clean_input)
+
+            is_match = False
+            if billing_email and billing_email == clean_input:
+                is_match = True
+            elif billing_phone and clean_input_phone and len(clean_input_phone) >= 10:
+                if billing_phone.endswith(clean_input_phone) or clean_input_phone.endswith(billing_phone):
+                    is_match = True
+
+            if not is_match:
                 await update.message.reply_text("❌ No matching order found.")
                 return
 
@@ -721,6 +743,7 @@ application.add_handler(CommandHandler(["start", "strat"], start))
 application.add_handler(CommandHandler("help", help_command))
 application.add_handler(CommandHandler("browse", browse_products))
 application.add_handler(CommandHandler("search", search_handler))
+application.add_handler(CommandHandler("my_order", my_order_handler))
 application.add_handler(CallbackQueryHandler(browse_products, pattern="^browse$"))
 application.add_handler(CallbackQueryHandler(show_products, pattern=r"^cat_\d+_\d+$"))
 application.add_handler(CallbackQueryHandler(show_products, pattern=r"^products_all_\d+$"))
