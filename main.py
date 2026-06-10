@@ -8,6 +8,7 @@ import socket
 import httpx
 import json
 from anthropic import AsyncAnthropic
+import openai
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Request
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update, BotCommand
@@ -339,65 +340,95 @@ Always mention prices in ৳ (Taka).
 """
 
 
-def get_ai_client():
-    provider = os.getenv("AI_PROVIDER", "anthropic").lower().strip()
-    model = os.getenv("AI_MODEL", "").strip()
+def get_providers_chain(primary_provider_name=None):
+    """Get a list of all configured and valid providers starting with the primary one."""
+    if not primary_provider_name:
+        primary_provider_name = os.getenv("AI_PROVIDER", "anthropic").lower().strip()
 
-    if provider == "anthropic":
-        api_key = os.getenv("ANTHROPIC_API_KEY")
-        client = AsyncAnthropic(api_key=api_key)
-        default_model = "claude-3-5-sonnet-20241022"
-        return "anthropic", client, model or default_model
+    providers_info = {
+        "anthropic": {
+            "key_var": "ANTHROPIC_API_KEY",
+            "type": "anthropic",
+            "default_model": "claude-3-5-sonnet-20241022",
+            "constructor": lambda key: ("anthropic", AsyncAnthropic(api_key=key))
+        },
+        "openrouter": {
+            "key_var": "OPENROUTER_API_KEY",
+            "type": "openai",
+            "default_model": "google/gemini-2.5-flash",
+            "constructor": lambda key: ("openai", openai.AsyncOpenAI(api_key=key, base_url="https://openrouter.ai/api/v1"))
+        },
+        "gemini": {
+            "key_var": "GEMINI_API_KEY",
+            "type": "openai",
+            "default_model": "gemini-1.5-flash",
+            "constructor": lambda key: ("openai", openai.AsyncOpenAI(api_key=key, base_url="https://generativelanguage.googleapis.com/v1beta/openai/"))
+        },
+        "groq": {
+            "key_var": "GROQ_API_KEY",
+            "type": "openai",
+            "default_model": "llama3-8b-8192",
+            "constructor": lambda key: ("openai", openai.AsyncOpenAI(api_key=key, base_url="https://api.groq.com/openai/v1"))
+        },
+        "openai": {
+            "key_var": "OPENAI_API_KEY",
+            "type": "openai",
+            "default_model": "gpt-4o-mini",
+            "constructor": lambda key: ("openai", openai.AsyncOpenAI(api_key=key))
+        },
+        "grok": {
+            "key_var": "GROK_API_KEY",
+            "type": "openai",
+            "default_model": "grok-2-1212",
+            "constructor": lambda key: ("openai", openai.AsyncOpenAI(api_key=key, base_url="https://api.x.ai/v1"))
+        }
+    }
 
-    elif provider == "openai":
-        api_key = os.getenv("OPENAI_API_KEY")
-        import openai
-        client = openai.AsyncOpenAI(api_key=api_key)
-        default_model = "gpt-4o-mini"
-        return "openai", client, model or default_model
+    chain = []
 
-    elif provider == "grok":
-        api_key = os.getenv("GROK_API_KEY")
-        import openai
-        client = openai.AsyncOpenAI(api_key=api_key, base_url="https://api.x.ai/v1")
-        default_model = "grok-2-1212"
-        return "openai", client, model or default_model
+    def is_valid_key(val):
+        if not val:
+            return False
+        val_lower = val.lower().strip()
+        return not (val_lower.startswith("your_") or val_lower.endswith("_here") or "placeholder" in val_lower)
 
-    elif provider == "gemini":
-        api_key = os.getenv("GEMINI_API_KEY")
-        import openai
-        client = openai.AsyncOpenAI(
-            api_key=api_key,
-            base_url="https://generativelanguage.googleapis.com/v1beta/openai/"
-        )
-        default_model = "gemini-1.5-flash"
-        return "openai", client, model or default_model
+    # First, add the primary provider if valid
+    primary_info = providers_info.get(primary_provider_name)
+    if primary_info:
+        key = os.getenv(primary_info["key_var"])
+        if is_valid_key(key):
+            try:
+                ctype, client = primary_info["constructor"](key)
+                model = os.getenv("AI_MODEL", "").strip() or primary_info["default_model"]
+                chain.append({
+                    "name": primary_provider_name,
+                    "client_type": ctype,
+                    "client": client,
+                    "model_name": model
+                })
+            except Exception as e:
+                logger.error("Failed to initialize primary provider %s: %s", primary_provider_name, str(e))
 
-    elif provider == "openrouter":
-        api_key = os.getenv("OPENROUTER_API_KEY")
-        import openai
-        client = openai.AsyncOpenAI(
-            api_key=api_key,
-            base_url="https://openrouter.ai/api/v1"
-        )
-        default_model = "google/gemini-2.5-flash"
-        return "openai", client, model or default_model
+    # Then add other valid fallback providers
+    fallback_order = ["openrouter", "gemini", "groq", "anthropic", "openai", "grok"]
+    for p_name in fallback_order:
+        if p_name == primary_provider_name:
+            continue
+        p_info = providers_info[p_name]
+        key = os.getenv(p_info["key_var"])
+        if is_valid_key(key):
+            try:
+                ctype, client = p_info["constructor"](key)
+                chain.append({
+                    "name": p_name,
+                    "client_type": ctype,
+                    "client": client,
+                    "model_name": p_info["default_model"]
+                })
+            except Exception as e:
+                logger.error("Failed to initialize fallback provider %s: %s", p_name, str(e))
 
-    elif provider == "groq":
-        api_key = os.getenv("GROQ_API_KEY")
-        import openai
-        client = openai.AsyncOpenAI(
-            api_key=api_key,
-            base_url="https://api.groq.com/openai/v1"
-        )
-        default_model = "llama3-8b-8192"
-        return "openai", client, model or default_model
-
-    else:
-        # Fallback to Anthropic
-        api_key = os.getenv("ANTHROPIC_API_KEY")
-        client = AsyncAnthropic(api_key=api_key)
-        return "anthropic", client, "claude-3-5-sonnet-20241022"
+    return chain
 
 
 class RAGAgent:
@@ -406,7 +437,7 @@ class RAGAgent:
         self.woo_key = woocommerce_key
         self.woo_secret = woocommerce_secret
         self.conversation_history = []
-        self.client_type, self.client, self.model_name = get_ai_client()
+        self.providers_chain = get_providers_chain()
 
     async def search_products(self, query: str, limit: int = 5):
         """Search products by keyword"""
@@ -495,19 +526,52 @@ class RAGAgent:
             ]
 
     async def process_message(self, user_message: str, user_id: int = None) -> str:
-        """Process user message with RAG + LLM"""
-        if self.client_type == "anthropic":
-            return await self._process_anthropic(user_message)
-        else:
-            return await self._process_openai(user_message)
+        """Process user message with RAG + LLM, falling back to other providers if needed"""
+        if not self.providers_chain:
+            raise RuntimeError("No valid AI providers configured in environment variables.")
 
-    async def _process_anthropic(self, user_message: str) -> str:
-        """Process user message using AsyncAnthropic"""
-        # Add user message to history
+        # Save a backup of conversation history before this processing run
+        history_backup = list(self.conversation_history)
+
+        # Append user message once
         self.conversation_history.append({
             "role": "user",
             "content": user_message
         })
+
+        last_error = None
+        for provider in self.providers_chain:
+            client_type = provider["client_type"]
+            client = provider["client"]
+            model_name = provider["model_name"]
+            provider_name = provider["name"]
+
+            logger.info("Trying AI provider '%s' (model: %s)...", provider_name, model_name)
+
+            try:
+                if client_type == "anthropic":
+                    response = await self._process_anthropic(client, model_name)
+                else:
+                    response = await self._process_openai(client, model_name)
+
+                logger.info("Successfully processed message using AI provider '%s'.", provider_name)
+                return response
+            except Exception as e:
+                logger.error("AI provider '%s' failed: %s", provider_name, str(e))
+                last_error = e
+                # Restore history to state before this attempt, retaining the user message
+                self.conversation_history = list(history_backup)
+                self.conversation_history.append({
+                    "role": "user",
+                    "content": user_message
+                })
+
+        # If all providers failed, restore history to original state (before user message) and raise
+        self.conversation_history = history_backup
+        raise last_error or RuntimeError("All AI providers in chain failed.")
+
+    async def _process_anthropic(self, client, model_name: str) -> str:
+        """Process user message using AsyncAnthropic"""
 
         # Define available tools for Claude
         tools = [
@@ -564,8 +628,8 @@ class RAGAgent:
         ]
 
         # Call Claude with tools
-        response = await self.client.messages.create(
-            model=self.model_name,
+        response = await client.messages.create(
+            model=model_name,
             max_tokens=1000,
             system=SYSTEM_PROMPT,
             tools=tools,
@@ -624,8 +688,8 @@ class RAGAgent:
             })
 
             # Call Claude again with tool results
-            response = await self.client.messages.create(
-                model=self.model_name,
+            response = await client.messages.create(
+                model=model_name,
                 max_tokens=1000,
                 system=SYSTEM_PROMPT,
                 tools=tools,
@@ -646,13 +710,8 @@ class RAGAgent:
 
         return final_response
 
-    async def _process_openai(self, user_message: str) -> str:
+    async def _process_openai(self, client, model_name: str) -> str:
         """Process user message using OpenAI-compatible API"""
-        # Add user message to history
-        self.conversation_history.append({
-            "role": "user",
-            "content": user_message
-        })
 
         # Define tools in OpenAI format
         tools = [
@@ -718,8 +777,8 @@ class RAGAgent:
         ]
 
         # Call OpenAI with tools
-        response = await self.client.chat.completions.create(
-            model=self.model_name,
+        response = await client.chat.completions.create(
+            model=model_name,
             messages=[{"role": "system", "content": SYSTEM_PROMPT}] + self.conversation_history,
             tools=tools,
             tool_choice="auto",
@@ -782,8 +841,8 @@ class RAGAgent:
                 })
 
             # Call OpenAI again with tool results
-            response = await self.client.chat.completions.create(
-                model=self.model_name,
+            response = await client.chat.completions.create(
+                model=model_name,
                 messages=[{"role": "system", "content": SYSTEM_PROMPT}] + self.conversation_history,
                 tools=tools,
                 tool_choice="auto",
