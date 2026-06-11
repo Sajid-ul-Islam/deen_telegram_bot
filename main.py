@@ -120,6 +120,7 @@ async def lifespan(fastapi_app: FastAPI):
 
         if bot_commands:
             logger.info("Registering bot commands dynamically: %s", [c.command for c in bot_commands])
+            await application.bot.delete_my_commands()
             await application.bot.set_my_commands(bot_commands)
 
         # Auto-register webhook if external URL is provided
