@@ -463,46 +463,42 @@ def extract_bengali_order_context(message: str) -> dict:
     return result
 
 
-def preprocess_search_query(query: str) -> str:
+translation_cache = SimpleCache(ttl_seconds=86400 * 7)  # 1 week
+
+async def preprocess_search_query(query: str) -> str:
     """Translate / normalise a customer search query to English WooCommerce terms.
 
     Handles:
     - Plain English queries (pass-through with synonym mapping)
     - Banglish (Bengali written in Latin script)
     - Bengali (Unicode) — normalised first, then token-by-token translation
-
-    For messages that look like order placements (contain phones, addresses,
-    names), only the product-related tokens are extracted so that noise like
-    phone numbers or street addresses don't pollute the WooCommerce search.
-
-    Returns a single English search string suitable for the WooCommerce
-    ``search`` query parameter.
+    - Dynamically translates unknown Bengali/Banglish words using AI to prevent failures.
     """
     if not query:
         return ""
 
-    # 1. Unicode normalise + Bengali digit conversion
     query = _normalize_bengali(query)
-    query_ascii = bn_to_arabic(query)  # Bengali digits → ASCII
+    query_ascii = bn_to_arabic(query)  
 
-    # 2. If this looks like an order-placement message, extract only the product
     ctx = extract_bengali_order_context(query_ascii)
     if ctx["is_order_intent"] and ctx["product"]:
         return ctx["product"]
 
-    # 3. Lowercase for case-insensitive matching
     q_lower = query.strip().lower()
 
-    # 4. Whole-phrase match (handles multi-word phrases like "সুতির কাপড়")
     if q_lower in SYNONYMS_MAP:
         translated = SYNONYMS_MAP[q_lower]
         return translated if translated else q_lower
+        
+    cached = translation_cache.get(q_lower)
+    if cached:
+        return cached
 
-    # 5. Tokenise on whitespace + common Bengali punctuation / question marks
     tokens = re.split(r"[\s,।?!৷]+", q_lower)
 
     translated_tokens = []
     skip_next = False
+    all_mapped = True
     for i, token in enumerate(tokens):
         if skip_next:
             skip_next = False
@@ -510,13 +506,10 @@ def preprocess_search_query(query: str) -> str:
         if not token:
             continue
 
-        # Skip pure-numeric tokens (prices, phone numbers, sizes) and
-        # phone-like patterns so order messages don't produce noisy queries
         ascii_token = bn_to_arabic(token)
         if re.fullmatch(r"[\d/\-+]+", ascii_token):
             continue
 
-        # Try two-word phrase first (e.g. "সুতির কাপড়", "নেভি ব্লু")
         if i + 1 < len(tokens) and tokens[i + 1]:
             two_word = token + " " + tokens[i + 1]
             if two_word in SYNONYMS_MAP:
@@ -526,23 +519,58 @@ def preprocess_search_query(query: str) -> str:
                 skip_next = True
                 continue
 
-        # Single token lookup
-        mapped = SYNONYMS_MAP.get(token, token)
-        if mapped:  # empty string → stop-word, skip
-            translated_tokens.append(mapped)
+        mapped = SYNONYMS_MAP.get(token)
+        if mapped is not None:
+            if mapped:
+                translated_tokens.append(mapped)
+        else:
+            all_mapped = False
+            translated_tokens.append(token)
+
+    if all_mapped:
+        result = " ".join(dict.fromkeys(translated_tokens))
+        translation_cache.set(q_lower, result)
+        return result
+        
+    # Dynamic AI Translation
+    try:
+        from rag_agent import get_providers_chain
+        providers = get_providers_chain()
+        if providers:
+            prompt = f"Translate the following Bengali/Banglish clothing search query to a concise English product search term for WooCommerce. If it's already English, just return it. Examples: 'সুতির জামা' -> 'cotton shirt', 'kalo genji' -> 'black t-shirt', 'পাঞ্জাবি' -> 'panjabi'. Return ONLY the english keyword(s), no quotes, no extra text. Query: '{q_lower}'"
+            for provider in providers:
+                try:
+                    client = provider["client"]
+                    if provider["client_type"] == "anthropic":
+                        response = await client.messages.create(
+                            model=provider["model_name"],
+                            max_tokens=20,
+                            messages=[{"role": "user", "content": prompt}]
+                        )
+                        result = response.content[0].text.strip().lower()
+                    else:
+                        response = await client.chat.completions.create(
+                            model=provider["model_name"],
+                            messages=[{"role": "user", "content": prompt}],
+                            max_tokens=20
+                        )
+                        result = response.choices[0].message.content.strip().lower()
+                    
+                    result = result.replace('"', '').replace("'", "")
+                    translation_cache.set(q_lower, result)
+                    return result
+                except Exception as e:
+                    logger.warning(f"Dynamic translation failed with {provider['name']}: {e}")
+    except ImportError:
+        pass
 
     if not translated_tokens:
-        return query.strip()
-
-    # De-duplicate while preserving order
-    seen: set = set()
-    result: list = []
-    for t in translated_tokens:
-        if t not in seen:
-            seen.add(t)
-            result.append(t)
-
-    return " ".join(result)
+        result = query.strip()
+    else:
+        result = " ".join(dict.fromkeys(translated_tokens))
+        
+    translation_cache.set(q_lower, result)
+    return result
 
 async def get_store_address():
     return (

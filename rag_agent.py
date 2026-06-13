@@ -31,7 +31,6 @@ from utils import (
     bn_to_arabic,
     format_price_display,
 )
-from main import get_categories
 from db import get_user_history, update_user_history
 
 
@@ -245,7 +244,7 @@ class RAGAgent:
 
     async def search_products(self, query: str, limit: int = 5):
         """Search products by keyword"""
-        processed_query = preprocess_search_query(query)
+        processed_query = await preprocess_search_query(query)
         logger.info("RAG search. Original: %s -> Processed: %s", query, processed_query)
         products = await woo_get(
             "products",
@@ -281,7 +280,7 @@ class RAGAgent:
         import main
         vector_store = main.global_vector_store
         
-        processed_query = preprocess_search_query(query)
+        processed_query = await preprocess_search_query(query)
         if not vector_store or not vector_store.embeddings:
             logger.warning("Vector store not initialized, falling back to keyword search")
             return await self.search_products(processed_query, limit)
@@ -553,6 +552,7 @@ class RAGAgent:
 
     async def show_categories(self):
         """Browse or show categories of products"""
+        from main import get_categories
         self.extra_buttons.append({"text": "👔 Browse Categories", "callback_data": "browse"})
         self.extra_buttons.append({"text": "🎁 Offers & Discounts", "callback_data": "offers"})
         categories = await get_categories(limit=20)

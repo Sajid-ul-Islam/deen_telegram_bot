@@ -347,7 +347,7 @@ async def get_category_by_id(category_id):
 
 async def search_products(keyword):
     """Search products by keyword."""
-    processed_keyword = preprocess_search_query(keyword)
+    processed_keyword = await preprocess_search_query(keyword)
     logger.info("Searching products. Original: %s -> Processed: %s", keyword, processed_keyword)
     products = await woo_get(
         "products",
