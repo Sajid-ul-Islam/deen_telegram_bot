@@ -24,7 +24,9 @@ from utils import (
     preprocess_search_query,
     woo_get,
     get_store_address,
-    md
+    md,
+    html_table_to_markdown,
+    extract_and_format_size_chart,
 )
 from db import get_user_history, update_user_history
 
@@ -192,71 +194,6 @@ def get_providers_chain(primary_provider_name=None):
                 logger.error("Failed to initialize fallback provider %s: %s", p_name, str(e))
     return chain
 
-def html_table_to_markdown(table_html):
-    rows = re.findall(r'<tr[^>]*>(.*?)</tr>', table_html, re.DOTALL | re.IGNORECASE)
-    md_rows = []
-
-    for row in rows:
-        cells = re.findall(r'<t[dh][^>]*>(.*?)</t[dh]>', row, re.DOTALL | re.IGNORECASE)
-        clean_cells = []
-        for cell in cells:
-            c = re.sub(r'<[^>]+>', '', cell)
-            c = html.unescape(c)
-            c = c.replace('\xa0', ' ').replace('\u200b', '')
-            c = c.strip()
-            clean_cells.append(c)
-        if clean_cells:
-            md_rows.append(clean_cells)
-
-    if not md_rows:
-        return ""
-
-    header_title = ""
-    start_idx = 0
-    if len(md_rows[0]) == 1 and len(md_rows) > 1:
-        header_title = f"📏 *{md_rows[0][0]}*"
-        start_idx = 1
-    elif len(md_rows[0]) == 1:
-        return f"📏 *{md_rows[0][0]}*"
-
-    table_lines = []
-    rows_to_format = md_rows[start_idx:]
-    if not rows_to_format:
-        return header_title
-
-    col_widths = {}
-    for r in rows_to_format:
-        for col_idx, cell in enumerate(r):
-            col_widths[col_idx] = max(col_widths.get(col_idx, 0), len(cell))
-
-    for idx, r in enumerate(rows_to_format):
-        row_str = " | ".join(f"{cell:<{col_widths.get(col_idx, len(cell))}}" for col_idx, cell in enumerate(r))
-        table_lines.append(row_str)
-        if idx == 0:
-            separator = "-+-".join("-" * col_widths.get(col_idx, len(cell)) for col_idx in range(len(r)))
-            table_lines.append(separator)
-
-    table_text = "\n".join(table_lines)
-
-    res = ""
-    if header_title:
-        res += header_title + "\n"
-    res += f"```\n{table_text}\n```"
-    return res
-
-
-def extract_and_format_size_chart(product):
-    if not isinstance(product, dict):
-        return None
-    for field in ["short_description", "description"]:
-        html_content = product.get(field, "")
-        if not html_content:
-            continue
-        tables = re.findall(r'<table[^>]*>.*?</table>', html_content, re.DOTALL | re.IGNORECASE)
-        for table in tables:
-            if any(x in table.lower() for x in ["size", "chart", "guide", "dimension", "measure"]):
-                return html_table_to_markdown(table)
-    return None
 
 
 class RAGAgent:

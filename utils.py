@@ -243,6 +243,7 @@ def get_tracking_info(order):
     return None, None
 
 def html_table_to_markdown(table_html):
+    """Convert an HTML table to an aligned column-row grid inside a monospace code block."""
     rows = re.findall(r'<tr[^>]*>(.*?)</tr>', table_html, re.DOTALL | re.IGNORECASE)
     md_rows = []
 
@@ -261,46 +262,47 @@ def html_table_to_markdown(table_html):
     if not md_rows:
         return ""
 
+    # Detect a single-cell title row (e.g., "Size Chart" spanning all columns)
     header_title = ""
     start_idx = 0
     if len(md_rows[0]) == 1 and len(md_rows) > 1:
-        header_title = f"📏 *{md(md_rows[0][0])}*"
+        header_title = md_rows[0][0]
         start_idx = 1
     elif len(md_rows[0]) == 1:
-        return f"📏 *{md(md_rows[0][0])}*"
+        return f"📏 *{md_rows[0][0]}*"
 
     rows_to_format = md_rows[start_idx:]
     if not rows_to_format:
-        return header_title
+        return f"📏 *{header_title}*" if header_title else ""
 
-    if len(rows_to_format) > 1:
-        headers = rows_to_format[0]
-        data_rows = rows_to_format[1:]
-        
-        lines = []
-        if header_title:
-            lines.append(header_title)
-            
-        for r in data_rows:
-            primary_val = r[0] if len(r) > 0 else ""
-            primary_head = headers[0] if len(headers) > 0 else ""
-            
-            lines.append(f"▪ *{md(primary_head)}: {md(primary_val)}*")
-            
-            details = []
-            for col_idx in range(1, len(r)):
-                head = headers[col_idx] if col_idx < len(headers) else f"Col{col_idx}"
-                val = r[col_idx]
-                details.append(f"{md(head)}: {md(val)}")
-            
-            if details:
-                lines.append("   " + " • ".join(details))
-            lines.append("")
-            
-        return "\n".join(lines).strip()
-    else:
-        # Just one row, print it normally
-        return " \\| ".join(md(c) for c in rows_to_format[0])
+    # Normalize all rows to the same number of columns
+    max_cols = max(len(r) for r in rows_to_format)
+    normalized = [r + [""] * (max_cols - len(r)) for r in rows_to_format]
+
+    # Calculate per-column widths (minimum 4 chars for readability)
+    col_widths = [
+        max(max(len(normalized[ri][ci]) for ri in range(len(normalized))), 4)
+        for ci in range(max_cols)
+    ]
+
+    def fmt_row(cells):
+        return " | ".join(str(cells[i]).ljust(col_widths[i]) for i in range(len(cells)))
+
+    def fmt_sep():
+        return "-+-".join("-" * col_widths[i] for i in range(max_cols))
+
+    # Build the grid: header row, separator, then data rows
+    grid_lines = []
+    grid_lines.append(fmt_row(normalized[0]))   # column headers
+    grid_lines.append(fmt_sep())                 # ----+----+----
+    for row in normalized[1:]:
+        grid_lines.append(fmt_row(row))          # data rows
+
+    grid_text = "\n".join(grid_lines)
+
+    title_line = f"📏 *{header_title}*\n" if header_title else "📏 *Size Chart*\n"
+    return f"{title_line}\n```\n{grid_text}\n```"
+
 
 def extract_and_format_size_chart(product):
     if not isinstance(product, dict):

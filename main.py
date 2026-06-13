@@ -209,8 +209,17 @@ async def get_all_products(limit=20):
     )
 
 
+async def _has_published_products(category_id) -> bool:
+    """Return True if a category has at least one published product."""
+    result = await woo_get(
+        "products",
+        params={"category": category_id, "status": "publish", "per_page": 1},
+    )
+    return isinstance(result, list) and len(result) > 0
+
+
 async def get_categories(limit=100):
-    """Fetch product categories that have products (with caching)."""
+    """Fetch product categories that have published products (with caching)."""
     cache_key = f"categories_{limit}"
     cached = categories_cache.get(cache_key)
     if cached is not None:
@@ -221,13 +230,23 @@ async def get_categories(limit=100):
         "products/categories",
         params={"per_page": limit, "orderby": "name", "order": "asc", "hide_empty": True},
     )
-    if isinstance(categories, list) and len(categories) > 0:
-        categories_cache.set(cache_key, categories)
-    return categories
+    if not isinstance(categories, list):
+        return categories
+
+    # WooCommerce term_count includes draft/private products when accessed via admin API.
+    # Validate each category in parallel to ensure it has at least 1 published product.
+    import asyncio
+    candidates = [c for c in categories if c.get("count", 0) > 0]
+    checks = await asyncio.gather(*[_has_published_products(c["id"]) for c in candidates])
+    valid_categories = [c for c, ok in zip(candidates, checks) if ok]
+
+    if valid_categories:
+        categories_cache.set(cache_key, valid_categories)
+    return valid_categories
 
 
 async def get_products_by_category(category_id, page=1, limit=8):
-    """Fetch products from a category."""
+    """Fetch published products from a category (all stock statuses shown with badge)."""
     return await woo_get(
         "products",
         params={
@@ -236,8 +255,7 @@ async def get_products_by_category(category_id, page=1, limit=8):
             "per_page": limit,
             "orderby": "date",
             "order": "desc",
-            "status": "publish",
-            "stock_status": "instock",
+            "status": "publish",  # Only published — never show drafts/private
         },
     )
 
@@ -703,9 +721,17 @@ async def show_products(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         if not isinstance(products, list) or not products:
             keyboard = [[InlineKeyboardButton("← Back", callback_data=back_callback)]]
+            empty_msg = (
+                "⚠️ *No published products in this category.*\n\n"
+                "All items here may be drafts or temporarily unavailable. "
+                "Browse other categories or search for products."
+            )
+            # Invalidate categories cache so next browse re-validates
+            categories_cache.clear()
             await query.edit_message_text(
-                text="No products found.",
+                text=empty_msg,
                 reply_markup=InlineKeyboardMarkup(keyboard),
+                parse_mode="Markdown",
             )
             return
 
