@@ -339,16 +339,25 @@ async def ai_chat_handler(update: Update, context: ContextTypes.DEFAULT_TYPE, di
     )
 
     try:
-        # Process message with RAG agent
-        response = await user_agents[user_id].process_message(user_message, user_id)
+        # Retrieve the user's cart
+        cart = context.user_data.get("cart", [])
 
-        # Attach continuous chat options to the final response
-        keyboard = [
-            [
-                InlineKeyboardButton("🗑️ Reset Chat", callback_data="reset_ai_chat"),
-                InlineKeyboardButton("← Back to Menu", callback_data="start_menu")
-            ]
-        ]
+        # Process message with RAG agent
+        response, extra_buttons = await user_agents[user_id].process_message(user_message, user_id, cart=cart)
+
+        # Attach continuous chat options and extra buttons to the final response
+        keyboard = []
+        if extra_buttons:
+            for btn in extra_buttons:
+                if "url" in btn:
+                    keyboard.append([InlineKeyboardButton(btn["text"], url=btn["url"])])
+                elif "callback_data" in btn:
+                    keyboard.append([InlineKeyboardButton(btn["text"], callback_data=btn["callback_data"])])
+
+        keyboard.append([
+            InlineKeyboardButton("🗑️ Reset Chat", callback_data="reset_ai_chat"),
+            InlineKeyboardButton("← Back to Menu", callback_data="start_menu")
+        ])
         reply_markup = InlineKeyboardMarkup(keyboard)
 
         # Split long responses (Telegram has 4096 char limit)

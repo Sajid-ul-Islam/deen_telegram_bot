@@ -42,6 +42,8 @@ class SimpleCache:
 
 categories_cache = SimpleCache(ttl_seconds=3600)  # 1 hour
 products_cache = SimpleCache(ttl_seconds=1800)    # 30 minutes
+pathao_status_cache = SimpleCache(ttl_seconds=900)  # 15 minutes
+pathao_token_cache = SimpleCache(ttl_seconds=7200)   # 2 hours
 
 SYNONYMS_MAP = {
     # Bangla terms
@@ -107,6 +109,12 @@ async def get_store_address():
     )
 
 async def get_pathao_tracking_status(consignment_id):
+    cache_key = f"pathao_{consignment_id}"
+    cached_status = pathao_status_cache.get(cache_key)
+    if cached_status is not None:
+        logger.info("Using cached Pathao tracking status for consignment: %s", consignment_id)
+        return cached_status
+
     try:
         base_url = os.getenv("PATHAO_BASE_URL", "https://api-hermes.pathao.com").rstrip("/")
         client_id = os.getenv("PATHAO_CLIENT_ID")
@@ -117,26 +125,39 @@ async def get_pathao_tracking_status(consignment_id):
         if not all([client_id, client_secret, username, password]):
             return None
 
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            token_resp = await client.post(f"{base_url}/aladdin/api/v1/issue-token", json={
-                "client_id": client_id,
-                "client_secret": client_secret,
-                "username": username,
-                "password": password,
-                "grant_type": "password"
-            })
-            if token_resp.status_code != 200:
+        async with httpx.AsyncClient(timeout=4.0) as client:
+            token = pathao_token_cache.get("auth_token")
+            if not token:
+                logger.info("Pathao auth token not cached. Requesting a new one.")
+                token_resp = await client.post(f"{base_url}/aladdin/api/v1/issue-token", json={
+                    "client_id": client_id,
+                    "client_secret": client_secret,
+                    "username": username,
+                    "password": password,
+                    "grant_type": "password"
+                })
+                if token_resp.status_code != 200:
+                    return None
+                token = token_resp.json().get("access_token")
+                if token:
+                    pathao_token_cache.set("auth_token", token)
+
+            if not token:
                 return None
 
-            token = token_resp.json().get("access_token")
             headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
 
             track_resp = await client.get(f"{base_url}/aladdin/api/v1/packages/{consignment_id}/track", headers=headers)
             if track_resp.status_code != 200:
+                if track_resp.status_code == 401:
+                    logger.warning("Pathao token returned 401 Unauthorized, clearing cached token.")
+                    pathao_token_cache.store.pop("auth_token", None)
                 return None
 
             data = track_resp.json()
             if data.get("error") and "Unauthorized" in data.get("message", ""):
+                logger.warning("Pathao track API returned Unauthorized, clearing cached token.")
+                pathao_token_cache.store.pop("auth_token", None)
                 return None
 
             track_data = data.get("data", {})
@@ -150,6 +171,9 @@ async def get_pathao_tracking_status(consignment_id):
                     time_str = h.get("time", "")
                     desc = h.get("description", h.get("status", ""))
                     text += f"  • _{md(time_str)}_: {md(desc)}\n"
+
+            if text:
+                pathao_status_cache.set(cache_key, text)
             return text
     except Exception as e:
         logger.error("Error fetching Pathao tracking status: %s", str(e))

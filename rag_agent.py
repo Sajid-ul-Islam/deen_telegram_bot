@@ -23,7 +23,8 @@ from utils import (
     products_cache,
     preprocess_search_query,
     woo_get,
-    get_store_address
+    get_store_address,
+    md
 )
 from db import get_user_history, update_user_history
 
@@ -38,6 +39,10 @@ You have access to tools to:
 1. Search products by keyword or category
 2. Get product details (price, description, stock, images)
 3. Provide personalized recommendations
+4. View the user's shopping cart (using view_cart) and checkout (using checkout)
+5. Show product categories (using show_categories)
+6. Securely lookup order status and track courier package (using order_lookup)
+7. Trigger manual forms or FAQ menus (using trigger_order_lookup, trigger_search, get_help)
 
 Your goals:
 - Help customers find exactly what they're looking for
@@ -45,6 +50,10 @@ Your goals:
 - Make personalized recommendations based on their needs
 - Be conversational and friendly
 - Handle queries intelligently by using tools when needed
+
+Security & Order Tracking:
+- When a customer wants to check their order status or track it, you MUST request BOTH the order number/ID and the billing email or phone number. Both parameters are strictly required by the `order_lookup` tool for safety.
+- If the order has been shipped or has a Pathao Courier consignment ID, you must fetch the live status from the Pathao Courier API (which the `order_lookup` tool automatically fetches) and display the current shipping status and tracking history to the customer.
 
 Language & Response Style:
 - Understand and reply in the user's preferred language, including English, Bangla (Bengali), and Banglish (Bengali written in Latin script).
@@ -349,8 +358,10 @@ class RAGAgent:
             for p in products[:5]
         ]
 
-    async def process_message(self, user_message: str, user_id: int = None) -> str:
+    async def process_message(self, user_message: str, user_id: int = None, cart: list = None) -> tuple[str, list]:
         """Process a user message using ReAct loop"""
+        self.cart = cart or []
+        self.extra_buttons = []
         if user_id is not None and not self.conversation_history:
             self.conversation_history = get_user_history(user_id)
             
@@ -387,6 +398,9 @@ class RAGAgent:
 
             logger.info("Trying AI provider '%s' (model: %s)...", provider_name, model_name)
 
+            # Clear extra buttons before each provider attempt in case of partial executions
+            self.extra_buttons = []
+
             try:
                 if client_type == "anthropic":
                     response = await self._process_anthropic(client, model_name, dynamic_system_prompt)
@@ -396,7 +410,7 @@ class RAGAgent:
                 logger.info("Successfully processed message using AI provider '%s'.", provider_name)
                 if self.user_id:
                     update_user_history(self.user_id, self.conversation_history)
-                return response
+                return response, self.extra_buttons
             except Exception as e:
                 logger.error("AI provider '%s' failed: %s", provider_name, str(e))
                 last_error = e
@@ -410,6 +424,117 @@ class RAGAgent:
         # If all providers failed, restore history to original state (before user message) and raise
         self.conversation_history = history_backup
         raise last_error or RuntimeError("All AI providers in chain failed.")
+
+    async def view_cart(self):
+        """View the current items in the user's shopping cart"""
+        self.extra_buttons.append({"text": "🛒 View Cart", "callback_data": "view_cart"})
+        if not self.cart:
+            return "Your shopping cart is currently empty."
+
+        self.extra_buttons.append({"text": "💳 Checkout", "callback_data": "checkout"})
+        items_desc = []
+        for idx, item in enumerate(self.cart, 1):
+            items_desc.append(f"{idx}. {item['name']} (x{item['quantity']})")
+        return "Here are the items in your cart:\n" + "\n".join(items_desc)
+
+    async def checkout(self):
+        """Proceed to checkout the items in the cart"""
+        if not self.cart:
+            return "Your cart is empty. Please add some products to your cart before checking out."
+
+        self.extra_buttons.append({"text": "💳 Checkout", "callback_data": "checkout"})
+        return "Please click the button below to proceed to checkout on our website."
+
+    async def show_categories(self):
+        """Browse or show categories of products"""
+        self.extra_buttons.append({"text": "👔 Browse Categories", "callback_data": "browse"})
+        categories = await woo_get(
+            "products/categories",
+            params={"per_page": 20, "orderby": "name", "order": "asc", "hide_empty": True},
+        )
+        if isinstance(categories, list) and categories:
+            cat_names = [c["name"] for c in categories if c.get("count", 0) > 0][:10]
+            return "Here are some of our clothing categories:\n" + ", ".join(cat_names) + "\n\nClick the button below to browse all categories!"
+        return "Click the button below to browse all clothing categories."
+
+    async def trigger_order_lookup(self):
+        """Guide the user to check their order using the secure lookup form"""
+        self.extra_buttons.append({"text": "📦 My Order", "callback_data": "my_order"})
+        return "Please click the button below to check your order status using our secure lookup form."
+
+    async def trigger_search(self):
+        """Guide the user to search products using the manual search input"""
+        self.extra_buttons.append({"text": "🔍 Search Products", "callback_data": "search"})
+        return "Click the button below to search our products manually."
+
+    async def get_help(self):
+        """Show the support and help menu with FAQs"""
+        self.extra_buttons.append({"text": "📞 Help & FAQ Menu", "callback_data": "help_menu"})
+        return "Here is our customer care FAQ menu where you can find details about payments, shipping, returns, and support."
+
+    async def order_lookup(self, order_id: str, email_or_phone: str):
+        """Look up the status and details of an order. Both order ID and billing email or phone number are required for security."""
+        if not order_id or not email_or_phone:
+            return "Error: Both order number and billing email/phone are required to check order status."
+
+        try:
+            order = await woo_get(f"orders/{order_id}")
+            if isinstance(order, dict) and "error" in order:
+                return "No matching order found."
+
+            billing_email = order.get("billing", {}).get("email", "").strip().lower()
+            billing_phone = re.sub(r"[^\d\+]", "", order.get("billing", {}).get("phone", ""))
+
+            clean_input = email_or_phone.strip().lower()
+            clean_input_phone = re.sub(r"[^\d\+]", "", clean_input)
+
+            is_match = False
+            if billing_email and billing_email == clean_input:
+                is_match = True
+            elif billing_phone and clean_input_phone and len(clean_input_phone) >= 10:
+                if billing_phone.endswith(clean_input_phone) or clean_input_phone.endswith(billing_phone):
+                    is_match = True
+
+            if not is_match:
+                return "No matching order found."
+
+            status = str(order.get("status", "")).upper()
+            total = order.get("total", "")
+            date_created = str(order.get("date_created", ""))[:10]
+
+            status_emoji = {
+                "PENDING": "⏳",
+                "PROCESSING": "🔄",
+                "ON-HOLD": "⏸️",
+                "COMPLETED": "✅",
+                "CANCELLED": "❌",
+                "REFUNDED": "🔄",
+                "FAILED": "❌",
+            }.get(status, "📦")
+
+            text = f"{status_emoji} *Order #{md(order_id)}*\n\nStatus: {md(status)}\nTotal: ৳{md(total)}\nDate: {md(date_created)}\n\n"
+
+            items = order.get("line_items", [])
+            if items:
+                text += "Items:\n"
+                for item in items:
+                    text += f"  • {md(item.get('name', 'Item'))} (qty: {md(item.get('quantity', ''))})\n"
+
+            from utils import get_tracking_info, get_pathao_tracking_status
+            consignment_id, tracking_url = get_tracking_info(order)
+            if consignment_id and tracking_url:
+                text += f"\n🚚 *Courier Tracking*\nTracking ID: `{md(consignment_id)}`\n"
+                if "pathao" in tracking_url.lower():
+                    pathao_status = await get_pathao_tracking_status(consignment_id)
+                    if pathao_status:
+                        text += f"\n{pathao_status}"
+
+                self.extra_buttons.append({"text": "🚚 Track Package", "url": tracking_url})
+
+            return text
+        except Exception as e:
+            logger.error("Error in AI order lookup: %s", str(e))
+            return "An error occurred while fetching your order details."
 
     async def _process_anthropic(self, client, model_name: str, dynamic_system_prompt: str) -> str:
         """Process user message using AsyncAnthropic"""
@@ -465,6 +590,72 @@ class RAGAgent:
                         }
                     }
                 }
+            },
+            {
+                "name": "view_cart",
+                "description": "View the current items in the user's shopping cart (returns list of items in cart and allows checking out)",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {}
+                }
+            },
+            {
+                "name": "checkout",
+                "description": "Proceed to checkout the items in the cart",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {}
+                }
+            },
+            {
+                "name": "show_categories",
+                "description": "Browse or list categories of products",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {}
+                }
+            },
+            {
+                "name": "trigger_order_lookup",
+                "description": "Guide the user to track or check their order using the secure lookup form",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {}
+                }
+            },
+            {
+                "name": "trigger_search",
+                "description": "Guide the user to search products manually",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {}
+                }
+            },
+            {
+                "name": "get_help",
+                "description": "Show the support, payments, shipping, returns and customer care FAQ menu",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {}
+                }
+            },
+            {
+                "name": "order_lookup",
+                "description": "Directly check the status and details of an order using its order ID and the billing email/phone for security.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "order_id": {
+                            "type": "string",
+                            "description": "The order ID/number"
+                        },
+                        "email_or_phone": {
+                            "type": "string",
+                            "description": "The billing email or billing phone number associated with the order"
+                        }
+                    },
+                    "required": ["order_id", "email_or_phone"]
+                }
             }
         ]
 
@@ -505,6 +696,23 @@ class RAGAgent:
                         result = await self.get_recommendations(
                             category=tool_input.get("category"),
                             price_range=tool_input.get("price_range")
+                        )
+                    elif tool_name == "view_cart":
+                        result = await self.view_cart()
+                    elif tool_name == "checkout":
+                        result = await self.checkout()
+                    elif tool_name == "show_categories":
+                        result = await self.show_categories()
+                    elif tool_name == "trigger_order_lookup":
+                        result = await self.trigger_order_lookup()
+                    elif tool_name == "trigger_search":
+                        result = await self.trigger_search()
+                    elif tool_name == "get_help":
+                        result = await self.get_help()
+                    elif tool_name == "order_lookup":
+                        result = await self.order_lookup(
+                            order_id=str(tool_input["order_id"]),
+                            email_or_phone=str(tool_input["email_or_phone"])
                         )
                     else:
                         result = {"error": f"Unknown tool: {tool_name}"}
@@ -614,6 +822,93 @@ class RAGAgent:
                         }
                     }
                 }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "view_cart",
+                    "description": "View the current items in the user's shopping cart (returns list of items in cart and allows checking out)",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {}
+                    }
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "checkout",
+                    "description": "Proceed to checkout the items in the cart",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {}
+                    }
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "show_categories",
+                    "description": "Browse or list categories of products",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {}
+                    }
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "trigger_order_lookup",
+                    "description": "Guide the user to track or check their order using the secure lookup form",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {}
+                    }
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "trigger_search",
+                    "description": "Guide the user to search products manually",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {}
+                    }
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_help",
+                    "description": "Show the support, payments, shipping, returns and customer care FAQ menu",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {}
+                    }
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "order_lookup",
+                    "description": "Directly check the status and details of an order using its order ID and the billing email/phone for security.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "order_id": {
+                                "type": "string",
+                                "description": "The order ID/number"
+                            },
+                            "email_or_phone": {
+                                "type": "string",
+                                "description": "The billing email or billing phone number associated with the order"
+                            }
+                        },
+                        "required": ["order_id", "email_or_phone"]
+                    }
+                }
             }
         ]
 
@@ -670,6 +965,23 @@ class RAGAgent:
                         result = await self.get_recommendations(
                             category=tool_input.get("category"),
                             price_range=tool_input.get("price_range")
+                        )
+                    elif tool_name == "view_cart":
+                        result = await self.view_cart()
+                    elif tool_name == "checkout":
+                        result = await self.checkout()
+                    elif tool_name == "show_categories":
+                        result = await self.show_categories()
+                    elif tool_name == "trigger_order_lookup":
+                        result = await self.trigger_order_lookup()
+                    elif tool_name == "trigger_search":
+                        result = await self.trigger_search()
+                    elif tool_name == "get_help":
+                        result = await self.get_help()
+                    elif tool_name == "order_lookup":
+                        result = await self.order_lookup(
+                            order_id=str(tool_input["order_id"]),
+                            email_or_phone=str(tool_input["email_or_phone"])
                         )
                     else:
                         result = {"error": f"Unknown tool: {tool_name}"}
