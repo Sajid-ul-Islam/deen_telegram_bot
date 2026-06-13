@@ -3,6 +3,7 @@ import time
 import re
 import html
 import logging
+import unicodedata
 import httpx
 from telegram.helpers import escape_markdown
 from dotenv import load_dotenv
@@ -45,16 +46,147 @@ products_cache = SimpleCache(ttl_seconds=1800)    # 30 minutes
 pathao_status_cache = SimpleCache(ttl_seconds=900)  # 15 minutes
 pathao_token_cache = SimpleCache(ttl_seconds=7200)   # 2 hours
 
+# ---------------------------------------------------------------------------
+# Bengali / Banglish → English synonym map
+# ---------------------------------------------------------------------------
+# Keys are Unicode-NFC normalised, lowercase Bengali/Banglish tokens.
+# Values are the English terms used in WooCommerce product names/descriptions.
+# ---------------------------------------------------------------------------
 SYNONYMS_MAP = {
-    # Bangla terms
+    # ── Clothing types (Bengali) ────────────────────────────────────────────
     "জামা": "shirt",
     "শার্ট": "shirt",
-    "প্যান্ট": "pants",
+    "কামিজ": "shirt",
     "পাঞ্জাবি": "panjabi",
-    "মানিব্যাগ": "wallet",
+    "পাঞ্জাব": "panjabi",
+    "পাঞ্জাবী": "panjabi",
+    "প্যান্ট": "pants",
+    "প্যান্টস": "pants",
+    "জিন্স": "jeans",
+    "জিনস": "jeans",
+    "ডেনিম": "denim",
     "গেঞ্জি": "t-shirt",
+    "টি-শার্ট": "t-shirt",
+    "টিশার্ট": "t-shirt",
+    "পোলো": "polo",
+    "পোলো শার্ট": "polo shirt",
+    "হাফ শার্ট": "half sleeve",
+    "হাফশার্ট": "half sleeve",
+    "ফুল শার্ট": "full sleeve",
+    "ফুলশার্ট": "full sleeve",
+    "শর্টস": "shorts",
+    "শর্ট": "shorts",
+    "লুঙ্গি": "lungi",
+    "পায়জামা": "pajama",
+    "পাইজামা": "pajama",
+    "সোয়েটার": "sweater",
+    "জ্যাকেট": "jacket",
+    "হুডি": "hoodie",
+    "কোট": "coat",
+    "ব্লেজার": "blazer",
+    "ওভারকোট": "overcoat",
+    "মানিব্যাগ": "wallet",
+    "ব্যাগ": "bag",
+    "বেল্ট": "belt",
+    "ক্যাপ": "cap",
+    "টুপি": "cap",
+    "মোজা": "socks",
+    "জুতা": "shoes",
+    "স্যান্ডেল": "sandal",
 
-    # Banglish terms
+    # ── Fabrics / materials (Bengali) ───────────────────────────────────────
+    "সুতি": "cotton",
+    "সুতির": "cotton",
+    "সুতীর": "cotton",
+    "সুতীর কাপড়": "cotton",
+    "সুতির কাপড়": "cotton",
+    "কটন": "cotton",
+    "লিনেন": "linen",
+    "পলিয়েস্টার": "polyester",
+    "পলিস্টার": "polyester",
+    "সিল্ক": "silk",
+    "রেশম": "silk",
+    "ভিসকোস": "viscose",
+    "ফ্লিস": "fleece",
+    "উল": "wool",
+    "নাইলন": "nylon",
+    "স্প্যান্ডেক্স": "spandex",
+    "ডেনিম কাপড়": "denim",
+    "কাপড়": "fabric",
+    "কটন কাপড়": "cotton",
+
+    # ── Colors (Bengali) ────────────────────────────────────────────────────
+    "লাল": "red",
+    "নীল": "blue",
+    "সবুজ": "green",
+    "হলুদ": "yellow",
+    "কমলা": "orange",
+    "বেগুনি": "purple",
+    "গোলাপি": "pink",
+    "গোলাপী": "pink",
+    "সাদা": "white",
+    "কালো": "black",
+    "ধূসর": "gray",
+    "ধুসর": "gray",
+    "বাদামি": "brown",
+    "বাদামী": "brown",
+    "খাকি": "khaki",
+    "ক্রিম": "cream",
+    "মেরুন": "maroon",
+    "আকাশি": "sky blue",
+    "আকাশী": "sky blue",
+    "নেভি": "navy",
+    "নেভি ব্লু": "navy blue",
+    "অলিভ": "olive",
+    "অফ হোয়াইট": "off white",
+    "চারকোল": "charcoal",
+    "তামা": "copper",
+    "সোনালি": "golden",
+    "সোনালী": "golden",
+    "রুপালি": "silver",
+    "রুপালী": "silver",
+
+    # ── Design / pattern (Bengali) ──────────────────────────────────────────
+    "চেক": "check",
+    "চেকার": "check",
+    "স্ট্রাইপ": "stripe",
+    "ডোরা": "stripe",
+    "ডোরাকাটা": "stripe",
+    "প্রিন্ট": "print",
+    "ফুলেল": "floral",
+    "ফ্লোরাল": "floral",
+    "সলিড": "solid",
+    "এমব্রয়ডারি": "embroidery",
+    "এমব্রোয়ডারি": "embroidery",
+    "পকেট": "pocket",
+    "স্লিম ফিট": "slim fit",
+    "রেগুলার ফিট": "regular fit",
+    "ওভারসাইজ": "oversize",
+    "ওভারসাইজড": "oversized",
+
+    # ── Common question words to strip ──────────────────────────────────────
+    # These words carry no product meaning; mapping to empty string removes them.
+    "আছে": "",
+    "আছেন": "",
+    "আছো": "",
+    "কি": "",
+    "কী": "",
+    "কোনো": "",
+    "কোন": "",
+    "পাবো": "",
+    "পাব": "",
+    "দাম": "price",
+    "মূল্য": "price",
+    "রং": "color",
+    "রঙ": "color",
+    "রঙের": "color",
+    "সাইজ": "size",
+    "মাপ": "size",
+    "অথবা": "",
+    "এবং": "",
+    "বা": "",
+
+    # ── Banglish (Latin-script Bengali) ─────────────────────────────────────
     "jama": "shirt",
     "shart": "shirt",
     "shurt": "shirt",
@@ -64,25 +196,136 @@ SYNONYMS_MAP = {
     "t-shirt": "t-shirt",
     "teeshirt": "t-shirt",
     "genji": "t-shirt",
+    "genja": "t-shirt",
     "panjabi": "panjabi",
     "punjabi": "panjabi",
+    "jeans": "jeans",
+    "jins": "jeans",
+    "denim": "denim",
     "wallet": "wallet",
     "moneybag": "wallet",
-    "bag": "wallet",
     "polo": "polo",
     "half sleeve": "half sleeve",
     "halfshirt": "half sleeve",
+    "full sleeve": "full sleeve",
+    "fullshirt": "full sleeve",
+    "suti": "cotton",
+    "sutir": "cotton",
+    "cotton": "cotton",
+    "linen": "linen",
+    "silk": "silk",
+    "lal": "red",
+    "nil": "blue",
+    "neel": "blue",
+    "shobuj": "green",
+    "holud": "yellow",
+    "komola": "orange",
+    "beguni": "purple",
+    "golapi": "pink",
+    "shada": "white",
+    "kalo": "black",
+    "dhushor": "gray",
+    "badami": "brown",
+    "khaki": "khaki",
+    "maroon": "maroon",
+    "navy": "navy",
+    "akashi": "sky blue",
+    "check": "check",
+    "stripe": "stripe",
+    "print": "print",
+    "floral": "floral",
+    "solid": "solid",
+    "hoodie": "hoodie",
+    "jacket": "jacket",
+    "sweater": "sweater",
+    "shorts": "shorts",
+    "lungi": "lungi",
+    "pajama": "pajama",
 }
 
-def preprocess_search_query(query):
+
+def _normalize_bengali(text: str) -> str:
+    """Normalize Bengali Unicode text.
+
+    Applies NFC normalization to collapse visually identical but differently
+    encoded sequences (e.g. ি U+09BF vs ী U+09C0 are *different* vowel signs
+    and intentionally kept distinct; NFC just ensures each is in its canonical
+    composed form so dictionary lookups are consistent).
+
+    Also strips zero-width joiners/non-joiners that can silently break matches.
+    """
+    # Canonical decomposition then recomposition
+    text = unicodedata.normalize("NFC", text)
+    # Remove zero-width characters that don't affect visual appearance
+    text = re.sub(r"[\u200b-\u200f\u00ad]", "", text)
+    return text
+
+
+def preprocess_search_query(query: str) -> str:
+    """Translate / normalise a customer search query to English WooCommerce terms.
+
+    Handles:
+    - Plain English queries (pass-through with synonym mapping)
+    - Banglish (Bengali written in Latin script)
+    - Bengali (Unicode) — normalised first, then token-by-token translation
+
+    Returns a single English search string suitable for the WooCommerce
+    ``search`` query parameter.
+    """
     if not query:
         return ""
-    q_clean = query.strip().lower()
-    if q_clean in SYNONYMS_MAP:
-        return SYNONYMS_MAP[q_clean]
-    words = q_clean.split()
-    mapped_words = [SYNONYMS_MAP.get(w, w) for w in words]
-    return " ".join(mapped_words)
+
+    # 1. Unicode normalise to make dictionary lookups reliable
+    query = _normalize_bengali(query)
+
+    # 2. Lowercase for case-insensitive matching
+    q_lower = query.strip().lower()
+
+    # 3. Whole-phrase match first (handles multi-word phrases like "সুতির কাপড়")
+    if q_lower in SYNONYMS_MAP:
+        translated = SYNONYMS_MAP[q_lower]
+        return translated if translated else q_lower
+
+    # 4. Tokenise on whitespace + common Bengali punctuation / question marks
+    tokens = re.split(r"[\s,।?!৷]+", q_lower)
+
+    translated_tokens = []
+    skip_next = False
+    for i, token in enumerate(tokens):
+        if skip_next:
+            skip_next = False
+            continue
+        if not token:
+            continue
+
+        # Try two-word phrase first (e.g. "সুতির কাপড়", "নেভি ব্লু")
+        if i + 1 < len(tokens) and tokens[i + 1]:
+            two_word = token + " " + tokens[i + 1]
+            if two_word in SYNONYMS_MAP:
+                mapped = SYNONYMS_MAP[two_word]
+                if mapped:  # empty means stop-word
+                    translated_tokens.append(mapped)
+                skip_next = True
+                continue
+
+        # Single token lookup
+        mapped = SYNONYMS_MAP.get(token, token)
+        if mapped:  # empty string → stop-word, skip
+            translated_tokens.append(mapped)
+
+    if not translated_tokens:
+        # Fall back to original query if nothing translated
+        return query.strip()
+
+    # De-duplicate while preserving order
+    seen = set()
+    result = []
+    for t in translated_tokens:
+        if t not in seen:
+            seen.add(t)
+            result.append(t)
+
+    return " ".join(result)
 
 async def get_store_address():
     return (
