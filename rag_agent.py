@@ -276,6 +276,45 @@ class RAGAgent:
             for p in products[:limit]
         ]
 
+    async def semantic_search_products(self, query: str, limit: int = 5):
+        """Search products using semantic vector similarity"""
+        import main
+        vector_store = main.global_vector_store
+        
+        if not vector_store or not vector_store.embeddings:
+            logger.warning("Vector store not initialized, falling back to keyword search")
+            return await self.search_products(query, limit)
+            
+        logger.info("RAG semantic search for: %s", query)
+        results = vector_store.search_products(query, top_k=limit)
+        products = [res["product"] for res in results]
+            
+        # Format for LLM
+        formatted = []
+        for p in products:
+            images = p.get("images", [])
+            image_url = ""
+            if images:
+                if isinstance(images[0], str):
+                    image_url = images[0]
+                elif isinstance(images[0], dict):
+                    image_url = images[0].get("src", "")
+                    
+            formatted.append({
+                "id": p["id"],
+                "name": p["name"],
+                "price": p["price"],
+                "regular_price": p.get("regular_price", ""),
+                "sale_price": p.get("sale_price", ""),
+                "formatted_price": format_price_display(p) if "formatted_price" not in p else p.get("formatted_price"),
+                "description": p.get("short_description", p.get("description", ""))[:200],
+                "stock": p.get("stock_quantity", "N/A"),
+                "image": image_url,
+                "permalink": p.get("permalink", "")
+            })
+            
+        return formatted
+
     async def get_product_details(self, product_id: int):
         """Get detailed product information (with caching)"""
         cache_key = f"product_{product_id}"
@@ -585,13 +624,32 @@ class RAGAgent:
         tools = [
             {
                 "name": "search_products",
-                "description": "Search for products by keyword (shirt, jeans, dress, etc.)",
+                "description": "Search for products by exact keyword matching (shirt, jeans, dress, etc.)",
                 "input_schema": {
                     "type": "object",
                     "properties": {
                         "query": {
                             "type": "string",
                             "description": "Product search query"
+                        },
+                        "limit": {
+                            "type": "integer",
+                            "description": "Number of results (default 5)",
+                            "default": 5
+                        }
+                    },
+                    "required": ["query"]
+                }
+            },
+            {
+                "name": "semantic_search_products",
+                "description": "Search for products using semantic meaning, best for vague queries like 'something for summer', 'trendy clothes', or 'wedding outfit'",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "query": {
+                            "type": "string",
+                            "description": "Semantic product search query"
                         },
                         "limit": {
                             "type": "integer",
@@ -730,6 +788,11 @@ class RAGAgent:
                             query=tool_input["query"],
                             limit=tool_input.get("limit", 5)
                         )
+                    elif tool_name == "semantic_search_products":
+                        result = await self.semantic_search_products(
+                            query=tool_input["query"],
+                            limit=tool_input.get("limit", 5)
+                        )
                     elif tool_name == "get_product_details":
                         result = await self.get_product_details(
                             product_id=tool_input["product_id"]
@@ -830,13 +893,35 @@ class RAGAgent:
                 "type": "function",
                 "function": {
                     "name": "search_products",
-                    "description": "Search for products by keyword (shirt, jeans, dress, etc.)",
+                    "description": "Search for products by exact keyword matching (shirt, jeans, dress, etc.)",
                     "parameters": {
                         "type": "object",
                         "properties": {
                             "query": {
                                 "type": "string",
                                 "description": "Product search query"
+                            },
+                            "limit": {
+                                "type": "integer",
+                                "description": "Number of results (default 5)",
+                                "default": 5
+                            }
+                        },
+                        "required": ["query"]
+                    }
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "semantic_search_products",
+                    "description": "Search for products using semantic meaning, best for vague queries like 'something for summer', 'trendy clothes', or 'wedding outfit'",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "query": {
+                                "type": "string",
+                                "description": "Semantic product search query"
                             },
                             "limit": {
                                 "type": "integer",

@@ -10,6 +10,8 @@ import httpx
 import json
 from anthropic import AsyncAnthropic
 import openai
+import schedule
+import asyncio
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel
@@ -86,6 +88,26 @@ from utils import (
 )
 from rag_agent import RAGAgent
 from db import upsert_user, set_subscription, track_command
+from product_embeddings import ProductVectorStore
+from woocommerce_knowledge_base import setup_knowledge_base
+
+global_vector_store = None
+
+async def update_knowledge_base_daily():
+    logger.info("Updating knowledge base from WooCommerce daily...")
+    try:
+        kb, docs = await setup_knowledge_base(WOOCOMMERCE_URL, WOOCOMMERCE_KEY, WOOCOMMERCE_SECRET, "woo_knowledge_base.json")
+        global global_vector_store
+        if global_vector_store:
+            global_vector_store.create_from_knowledge_base("woo_knowledge_base.json")
+        logger.info("Knowledge base and embeddings updated successfully.")
+    except Exception as e:
+        logger.error("Error updating knowledge base: %s", str(e))
+
+async def scheduler_task():
+    while True:
+        schedule.run_pending()
+        await asyncio.sleep(60)
 
 @asynccontextmanager
 async def lifespan(fastapi_app: FastAPI):
@@ -108,6 +130,23 @@ async def lifespan(fastapi_app: FastAPI):
             auth=(WOOCOMMERCE_KEY, WOOCOMMERCE_SECRET),
             timeout=10.0
         )
+
+        # Initialize Vector Store
+        global global_vector_store
+        global_vector_store = ProductVectorStore()
+        try:
+            if not os.path.exists("woo_knowledge_base.json"):
+                logger.info("Initial run: Fetching WooCommerce data and generating new embeddings for Supabase...")
+                await setup_knowledge_base(WOOCOMMERCE_URL, WOOCOMMERCE_KEY, WOOCOMMERCE_SECRET, "woo_knowledge_base.json")
+                global_vector_store.create_from_knowledge_base("woo_knowledge_base.json")
+            else:
+                logger.info("ProductVectorStore initialized with Supabase integration.")
+        except Exception as e:
+            logger.error("Failed to initialize ProductVectorStore: %s", str(e))
+            
+        # Schedule daily updates at 2 AM
+        schedule.every().day.at("02:00").do(lambda: asyncio.create_task(update_knowledge_base_daily()))
+        asyncio.create_task(scheduler_task())
 
         await application.initialize()
         await application.start()
