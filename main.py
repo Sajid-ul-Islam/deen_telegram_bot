@@ -1622,6 +1622,20 @@ async def admin_dashboard(request: Request):
 
     total_commands = sum(global_cmd_totals.values())
 
+    # ── Fetch Vector Store Stats ─────────────────────────────────────────────
+    try:
+        if global_vector_store and global_vector_store.has_connection:
+            prod_resp = supabase.table("product_embeddings").select("id", count="exact").execute()
+            page_resp = supabase.table("page_embeddings").select("id", count="exact").execute()
+            total_products_indexed = prod_resp.count if hasattr(prod_resp, 'count') else "N/A"
+            total_pages_indexed = page_resp.count if hasattr(page_resp, 'count') else "N/A"
+        else:
+            total_products_indexed = "Not Connected"
+            total_pages_indexed = "Not Connected"
+    except Exception as e:
+        total_products_indexed = f"Error: {e}"
+        total_pages_indexed = f"Error: {e}"
+
     # ── Build command breakdown table rows ───────────────────────────────────
     COMMAND_LABELS = {
         "start": "🏠 /start — Main Menu",
@@ -1725,6 +1739,8 @@ async def admin_dashboard(request: Request):
                 <div class="stat-card"><div class="stat-num">{active_ai_users}</div><div class="stat-lbl">🤖 AI Users</div></div>
                 <div class="stat-card"><div class="stat-num">{total_ai_queries:,}</div><div class="stat-lbl">💬 AI Messages</div></div>
                 <div class="stat-card"><div class="stat-num">{total_commands:,}</div><div class="stat-lbl">🖱️ Commands Run</div></div>
+                <div class="stat-card"><div class="stat-num">{total_products_indexed}</div><div class="stat-lbl">📦 Vector Products</div></div>
+                <div class="stat-card"><div class="stat-num">{total_pages_indexed}</div><div class="stat-lbl">📄 Vector Pages</div></div>
             </div>
 
             <div class="card">

@@ -21,7 +21,7 @@ Required environment variables:
 
 ## Development Rules
 
-- The bot uses **Supabase** for persisting user information (Telegram ID, first name) and AI conversation histories. Ensure `SUPABASE_URL` and `SUPABASE_KEY` are configured.
+- The bot uses **Supabase** for persisting user information (Telegram ID, first name), AI conversation histories, and RAG embeddings using pgvector. Ensure `SUPABASE_URL` and `SUPABASE_KEY` are configured.
 - Do not expose customer orders by email alone. Order lookup must require at least order number plus billing email.
 - Keep Telegram webhook validation using `X-Telegram-Bot-Api-Secret-Token`.
 - Escape user and WooCommerce text before sending Markdown messages.

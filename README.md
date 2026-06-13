@@ -17,6 +17,7 @@ A simple Telegram bot for your WooCommerce store that allows customers to:
 
 **Features:**
 - Persistent user history and AI context via Supabase
+- Advanced RAG (Retrieval-Augmented Generation) semantic search using Supabase **pgvector**
 - Direct integration with WooCommerce REST API
 - Real-time product and order data
 - Product category browsing with paginated product lists
@@ -118,8 +119,9 @@ Once the deployment finishes and the service starts up, the webhook is automatic
 
 ### 🤖 AI Shopping Assistant
 - Context-aware RAG AI that remembers your past conversations (persisted via Supabase)
+- **Store Policies RAG**: The bot learns your WooCommerce pages (About Us, Shipping, FAQs) and answers customer questions instantly
 - Auto-recommends alternative items if a product is out of stock
-- Understands and searches the full product catalog
+- Understands and searches the full product catalog semantically using pgvector
 
 ### 🔍 Search
 - Search products by keyword

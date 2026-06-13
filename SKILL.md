@@ -10,7 +10,7 @@ graph TD
     Telegram[Telegram API] -->|Webhook POST /telegram/webhook| FastAPI[FastAPI App]
     FastAPI -->|Processes Updates| PTB[Python Telegram Bot Application]
     PTB -->|WooCommerce REST API| Woo[WooCommerce API /wp-json/wc/v3/]
-    PTB -->|Supabase SQL| Supabase[(Supabase Database)]
+    PTB -->|Supabase SQL| Supabase[(Supabase Database - users, pgvector)]
     PTB -->|Sends Messages/Photos| Telegram
 ```
 
@@ -49,3 +49,4 @@ graph TD
 - Attach `🗑️ Reset Chat` (`reset_ai_chat`) and `← Back to Menu` (`start_menu`) inline buttons to final AI responses for continuous chat UI/UX.
 - Add `View on Website` / `View Category on Website` buttons on products, category product lists, and search results.
 - Implement/maintain multi-provider AI fallback logic for RAG with `max_tokens=1000` limits for OpenAI-compatible clients.
+- For AI knowledge, the bot uses `VectorStore` (in `product_embeddings.py`) connecting to Supabase pgvector (`product_embeddings` and `page_embeddings` tables) to search products and store policies (FAQs, about us).
