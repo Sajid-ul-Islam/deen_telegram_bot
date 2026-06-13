@@ -88,7 +88,7 @@ from utils import (
 )
 from rag_agent import RAGAgent
 from db import upsert_user, set_subscription, track_command
-from product_embeddings import ProductVectorStore
+from product_embeddings import VectorStore
 from woocommerce_knowledge_base import setup_knowledge_base
 
 global_vector_store = None
@@ -133,16 +133,16 @@ async def lifespan(fastapi_app: FastAPI):
 
         # Initialize Vector Store
         global global_vector_store
-        global_vector_store = ProductVectorStore()
+        global_vector_store = VectorStore()
         try:
             if not os.path.exists("woo_knowledge_base.json"):
                 logger.info("Initial run: Fetching WooCommerce data and generating new embeddings for Supabase...")
                 await setup_knowledge_base(WOOCOMMERCE_URL, WOOCOMMERCE_KEY, WOOCOMMERCE_SECRET, "woo_knowledge_base.json")
                 global_vector_store.create_from_knowledge_base("woo_knowledge_base.json")
             else:
-                logger.info("ProductVectorStore initialized with Supabase integration.")
+                logger.info("VectorStore initialized with Supabase integration.")
         except Exception as e:
-            logger.error("Failed to initialize ProductVectorStore: %s", str(e))
+            logger.error("Failed to initialize VectorStore: %s", str(e))
             
         # Schedule daily updates at 2 AM
         schedule.every().day.at("02:00").do(lambda: asyncio.create_task(update_knowledge_base_daily()))

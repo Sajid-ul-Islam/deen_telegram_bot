@@ -315,6 +315,29 @@ class RAGAgent:
             
         return formatted
 
+    async def search_store_policies(self, query: str, limit: int = 3):
+        """Search store pages and policies using semantic similarity"""
+        import main
+        vector_store = main.global_vector_store
+        
+        if not vector_store or not vector_store.embeddings:
+            logger.warning("Vector store not initialized, cannot search policies")
+            return []
+            
+        logger.info("RAG semantic search for pages: %s", query)
+        results = vector_store.search_pages(query, top_k=limit)
+        
+        # Format for LLM
+        formatted = []
+        for r in results:
+            formatted.append({
+                "title": r["title"],
+                "content": r["content"],
+                "link": r["link"]
+            })
+            
+        return formatted
+
     async def get_product_details(self, product_id: int):
         """Get detailed product information (with caching)"""
         cache_key = f"product_{product_id}"
@@ -661,6 +684,20 @@ class RAGAgent:
                 }
             },
             {
+                "name": "search_store_policies",
+                "description": "Search the store's knowledge base for policies, FAQs, About Us, shipping information, or general store information.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "query": {
+                            "type": "string",
+                            "description": "The policy or info question (e.g., 'shipping time', 'return policy')"
+                        }
+                    },
+                    "required": ["query"]
+                }
+            },
+            {
                 "name": "get_product_details",
                 "description": "Get detailed information about a specific product",
                 "input_schema": {
@@ -792,6 +829,11 @@ class RAGAgent:
                         result = await self.semantic_search_products(
                             query=tool_input["query"],
                             limit=tool_input.get("limit", 5)
+                        )
+                    elif tool_name == "search_store_policies":
+                        result = await self.search_store_policies(
+                            query=tool_input["query"],
+                            limit=3
                         )
                     elif tool_name == "get_product_details":
                         result = await self.get_product_details(
@@ -927,6 +969,23 @@ class RAGAgent:
                                 "type": "integer",
                                 "description": "Number of results (default 5)",
                                 "default": 5
+                            }
+                        },
+                        "required": ["query"]
+                    }
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "search_store_policies",
+                    "description": "Search the store's knowledge base for policies, FAQs, About Us, shipping information, or general store information.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "query": {
+                                "type": "string",
+                                "description": "The policy or info question (e.g., 'shipping time', 'return policy')"
                             }
                         },
                         "required": ["query"]
@@ -1103,6 +1162,10 @@ class RAGAgent:
                         result = await self.search_products(
                             query=tool_input["query"],
                             limit=tool_input.get("limit", 5)
+                        )
+                    elif tool_name == "search_store_policies":
+                        result = await self.search_store_policies(
+                            query=tool_input["query"]
                         )
                     elif tool_name == "get_product_details":
                         result = await self.get_product_details(

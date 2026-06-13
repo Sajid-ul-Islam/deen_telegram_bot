@@ -14,6 +14,7 @@ class WooCommerceKnowledgeBase:
         self.products = []
         self.categories = []
         self.orders = []
+        self.pages = []
     
     async def fetch_all_products(self) -> List[Dict]:
         """Fetch ALL products from WooCommerce"""
@@ -109,6 +110,43 @@ class WooCommerceKnowledgeBase:
             self.orders = response.json()
             print(f"✅ Loaded {len(self.orders)} recent orders")
             return self.orders
+            
+    async def fetch_pages(self) -> List[Dict]:
+        """Fetch WordPress pages (for custom info like FAQs, Policies)"""
+        print("📄 Fetching store pages...")
+        import re
+        
+        async with httpx.AsyncClient(timeout=30) as client:
+            try:
+                response = await client.get(
+                    f"{self.woo_url}/wp-json/wp/v2/pages",
+                    params={"per_page": 100}
+                )
+                if response.status_code == 200:
+                    pages = response.json()
+                    self.pages = []
+                    for page in pages:
+                        # Strip HTML
+                        raw_content = page.get("content", {}).get("rendered", "")
+                        clean_content = re.sub(r'<[^>]+>', ' ', raw_content).strip()
+                        clean_content = re.sub(r'\s+', ' ', clean_content)
+                        
+                        self.pages.append({
+                            "id": page["id"],
+                            "title": page.get("title", {}).get("rendered", ""),
+                            "content": clean_content,
+                            "link": page.get("link", "")
+                        })
+                    print(f"✅ Loaded {len(self.pages)} pages")
+                    return self.pages
+                else:
+                    print(f"⚠️ Failed to load pages: {response.status_code}")
+                    self.pages = []
+                    return []
+            except Exception as e:
+                print(f"⚠️ Error fetching pages: {e}")
+                self.pages = []
+                return []
     
     def create_knowledge_documents(self) -> List[Dict]:
         """Create knowledge documents from WooCommerce data"""
@@ -215,6 +253,7 @@ Stock Levels:
         data = {
             "products": self.products,
             "categories": self.categories,
+            "pages": self.pages,
             "metadata": {
                 "total_products": len(self.products),
                 "total_categories": len(self.categories),
@@ -241,6 +280,7 @@ async def setup_knowledge_base(woo_url: str, woo_key: str, woo_secret: str, outp
     # Fetch all data
     await kb.fetch_all_products()
     await kb.fetch_categories()
+    await kb.fetch_pages()
     await kb.fetch_recent_orders(limit=50)
     
     # Create knowledge documents
