@@ -83,32 +83,28 @@ def preprocess_search_query(query):
     return " ".join(mapped_words)
 
 async def get_store_address():
-    global store_address_cache
-    if store_address_cache:
-        return store_address_cache
-        
-    try:
-        settings = await woo_get("settings/general")
-        if isinstance(settings, list):
-            address_1 = ""
-            address_2 = ""
-            city = ""
-            for s in settings:
-                if s["id"] == "woocommerce_store_address":
-                    address_1 = s.get("value", "")
-                elif s["id"] == "woocommerce_store_address_2":
-                    address_2 = s.get("value", "")
-                elif s["id"] == "woocommerce_store_city":
-                    city = s.get("value", "")
-                    
-            parts = [p for p in [address_1, address_2, city] if p]
-            if parts:
-                store_address_cache = ", ".join(parts)
-                return store_address_cache
-    except Exception as e:
-        logger.error(f"Error fetching store address: {e}")
-        
-    return "Store address not available."
+    return (
+        "DEEN Mirpur 12 Outlet\n"
+        "📍 ৩য় তলা, রমজান্নেছা সুপার মার্কেট, মিরপুর ১২, ঢাকা।\n"
+        "📞 01972 627 981\n"
+        "🕐 প্রতিদিন সকাল ১০টা থেকে রাত ১০টা পর্যন্ত। (সাপ্তাহিক বন্ধ রবিবার)\n"
+        "গুগল ম্যাপঃ https://g.co/kgs/3pCJkAZ\n\n"
+        "DEEN Wari Outlet\n"
+        "📍 Ground Floor, 41 A.K Famous Tower, Rankin Street, Wari, Dhaka 1203.\n"
+        "📞 01972-627983\n"
+        "🕐 প্রতিদিন সকাল ১০টা থেকে রাত ১০টা পর্যন্ত। (সাপ্তাহিক বন্ধ রবিবার)\n"
+        "গুগল ম্যাপঃ https://g.co/kgs/Cu71N8U\n\n"
+        "DEEN Cumilla Outlet\n"
+        "📍 4th floor, QR Tower, F56H+PF5, QR Tower, Badurtola, Cumilla.\n"
+        "📞 01972 627984\n"
+        "🕐 প্রতিদিন সকাল ১০টা থেকে রাত ১০টা পর্যন্ত। (সাপ্তাহিক বন্ধ শুক্রবার)\n"
+        "গুগল ম্যাপঃ https://g.co/kgs/Dav6rNx\n\n"
+        "DEEN Sylhet Outlet\n"
+        "📍 Block-A, House-54/2, Kumar Para, Sylhet\n"
+        "📞 01972-627985\n"
+        "🕐 প্রতিদিন সকাল ১০টা থেকে রাত ১০টা পর্যন্ত। (সাপ্তাহিক বন্ধ শুক্রবার)\n"
+        "গুগল ম্যাপঃ https://g.co/kgs/QsvRbtH"
+    )
 
 async def get_pathao_tracking_status(consignment_id):
     try:

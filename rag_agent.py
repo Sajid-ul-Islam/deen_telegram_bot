@@ -22,7 +22,6 @@ WOOCOMMERCE_SECRET = os.getenv("WOOCOMMERCE_SECRET")
 from utils import (
     products_cache,
     preprocess_search_query,
-    extract_and_format_size_chart,
     woo_get,
     get_store_address
 )
@@ -79,44 +78,50 @@ When a customer asks a question:
 def get_providers_chain(primary_provider_name=None):
     """Get a list of all configured and valid providers starting with the primary one."""
     if not primary_provider_name:
-        primary_provider_name = os.getenv("AI_PROVIDER", "anthropic").lower().strip()
+        primary_provider_name = os.getenv("AI_PROVIDER", "openrouter").lower().strip()
 
     providers_info = {
-        "anthropic": {
-            "key_var": "ANTHROPIC_API_KEY",
-            "type": "anthropic",
-            "default_model": "claude-3-5-sonnet-20241022",
-            "constructor": lambda key: ("anthropic", AsyncAnthropic(api_key=key))
-        },
         "openrouter": {
-            "key_var": "OPENROUTER_API_KEY",
+            "key_vars": ["OPENROUTER_API_KEY"],
             "type": "openai",
             "default_model": "google/gemini-2.5-flash",
-            "constructor": lambda key: ("openai", openai.AsyncOpenAI(api_key=key, base_url="https://openrouter.ai/api/v1"))
-        },
-        "gemini": {
-            "key_var": "GEMINI_API_KEY",
-            "type": "openai",
-            "default_model": "gemini-1.5-flash",
-            "constructor": lambda key: ("openai", openai.AsyncOpenAI(api_key=key, base_url="https://generativelanguage.googleapis.com/v1beta/openai/"))
+            "constructor": lambda key: ("openai", openai.AsyncOpenAI(api_key=key, base_url="https://openrouter.ai/api/v1", timeout=10.0))
         },
         "groq": {
-            "key_var": "GROQ_API_KEY",
+            "key_vars": ["GROQ_API_KEY"],
             "type": "openai",
             "default_model": "llama3-8b-8192",
-            "constructor": lambda key: ("openai", openai.AsyncOpenAI(api_key=key, base_url="https://api.groq.com/openai/v1"))
+            "constructor": lambda key: ("openai", openai.AsyncOpenAI(api_key=key, base_url="https://api.groq.com/openai/v1", timeout=10.0))
         },
         "openai": {
-            "key_var": "OPENAI_API_KEY",
+            "key_vars": ["OPENAI_API_KEY"],
             "type": "openai",
             "default_model": "gpt-4o-mini",
-            "constructor": lambda key: ("openai", openai.AsyncOpenAI(api_key=key))
+            "constructor": lambda key: ("openai", openai.AsyncOpenAI(api_key=key, timeout=10.0))
         },
-        "grok": {
-            "key_var": "GROK_API_KEY",
+        "anthropic": {
+            "key_vars": ["ANTHROPIC_API_KEY"],
+            "type": "anthropic",
+            "default_model": "claude-3-5-sonnet-20241022",
+            "constructor": lambda key: ("anthropic", AsyncAnthropic(api_key=key, timeout=10.0))
+        },
+        "xai": {
+            "key_vars": ["XAI_API_KEY", "GROK_API_KEY"],
             "type": "openai",
             "default_model": "grok-2-1212",
-            "constructor": lambda key: ("openai", openai.AsyncOpenAI(api_key=key, base_url="https://api.x.ai/v1"))
+            "constructor": lambda key: ("openai", openai.AsyncOpenAI(api_key=key, base_url="https://api.x.ai/v1", timeout=10.0))
+        },
+        "grok": {
+            "key_vars": ["GROK_API_KEY", "XAI_API_KEY"],
+            "type": "openai",
+            "default_model": "grok-2-1212",
+            "constructor": lambda key: ("openai", openai.AsyncOpenAI(api_key=key, base_url="https://api.x.ai/v1", timeout=10.0))
+        },
+        "gemini": {
+            "key_vars": ["GEMINI_API_KEY"],
+            "type": "openai",
+            "default_model": "gemini-1.5-flash",
+            "constructor": lambda key: ("openai", openai.AsyncOpenAI(api_key=key, base_url="https://generativelanguage.googleapis.com/v1beta/openai/", timeout=10.0))
         }
     }
 
@@ -128,11 +133,18 @@ def get_providers_chain(primary_provider_name=None):
         val_lower = val.lower().strip()
         return not (val_lower.startswith("your_") or val_lower.endswith("_here") or "placeholder" in val_lower)
 
+    def get_api_key(p_info):
+        for kv in p_info.get("key_vars", []):
+            val = os.getenv(kv)
+            if is_valid_key(val):
+                return val
+        return None
+
     # First, add the primary provider if valid
     primary_info = providers_info.get(primary_provider_name)
     if primary_info:
-        key = os.getenv(primary_info["key_var"])
-        if is_valid_key(key):
+        key = get_api_key(primary_info)
+        if key:
             try:
                 ctype, client = primary_info["constructor"](key)
                 model = os.getenv("AI_MODEL", "").strip() or primary_info["default_model"]
@@ -145,14 +157,20 @@ def get_providers_chain(primary_provider_name=None):
             except Exception as e:
                 logger.error("Failed to initialize primary provider %s: %s", primary_provider_name, str(e))
 
-    # Then add other valid fallback providers
-    fallback_order = ["openrouter", "gemini", "groq", "anthropic", "openai", "grok"]
+    # Then add other valid fallback providers in cascade order
+    fallback_order = ["openrouter", "groq", "openai", "anthropic", "xai", "gemini"]
     for p_name in fallback_order:
-        if p_name == primary_provider_name:
+        is_same_as_primary = (
+            (p_name == primary_provider_name) or
+            (p_name == "xai" and primary_provider_name == "grok") or
+            (p_name == "grok" and primary_provider_name == "xai")
+        )
+        if is_same_as_primary:
             continue
+
         p_info = providers_info[p_name]
-        key = os.getenv(p_info["key_var"])
-        if is_valid_key(key):
+        key = get_api_key(p_info)
+        if key:
             try:
                 ctype, client = p_info["constructor"](key)
                 chain.append({
@@ -337,7 +355,14 @@ class RAGAgent:
             self.conversation_history = get_user_history(user_id)
             
         store_address = await get_store_address()
-        dynamic_system_prompt = SYSTEM_PROMPT + f"\n\n[STORE ADDRESS]\nThe physical outlet address for DeenCommerce is: {store_address}\nIf a customer asks where your store is located or if they can visit, provide them with this address."
+        dynamic_system_prompt = (
+            SYSTEM_PROMPT +
+            f"\n\n[STORE ADDRESS]\nThe physical outlet addresses for DeenCommerce are:\n{store_address}\n\n"
+            f"[OUTLET INSTRUCTIONS]\n"
+            f"- If a customer asks for a specific outlet's address (e.g., Mirpur, Wari, Cumilla, or Sylhet), provide ONLY that specific outlet's details (address, phone, hours, and map link), NOT all of them.\n"
+            f"- If a customer asks for outlets in Dhaka, provide ONLY the Mirpur and Wari outlets' details.\n"
+            f"- If they ask generally about your store locations, outlets, or where they can visit, list all 4 outlets."
+        )
 
         messages = self.conversation_history + [{"role": "user", "content": user_message}]
 
@@ -615,11 +640,14 @@ class RAGAgent:
                     }
                 })
 
-            self.conversation_history.append({
+            assistant_dict = {
                 "role": "assistant",
-                "content": assistant_msg.content or "",
                 "tool_calls": tool_calls_list
-            })
+            }
+            if assistant_msg.content is not None:
+                assistant_dict["content"] = assistant_msg.content
+
+            self.conversation_history.append(assistant_dict)
 
             # Execute tools
             for tc in assistant_msg.tool_calls:

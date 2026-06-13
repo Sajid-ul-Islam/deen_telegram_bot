@@ -54,3 +54,11 @@ def update_user_history(user_id: int, history: list):
         supabase.table("users").update({"chat_history": history}).eq("id", user_id).execute()
     except Exception as e:
         logger.error(f"Failed to update history for user {user_id}: {e}")
+
+def set_subscription(user_id: int, is_subscribed: bool):
+    if not supabase:
+        return
+    try:
+        supabase.table("users").update({"is_subscribed": is_subscribed}).eq("id", user_id).execute()
+    except Exception as e:
+        logger.error(f"Failed to update subscription for {user_id}: {e}")

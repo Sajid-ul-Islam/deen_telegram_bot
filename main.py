@@ -12,6 +12,8 @@ from anthropic import AsyncAnthropic
 import openai
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Request
+from pydantic import BaseModel
+from fastapi.responses import HTMLResponse, RedirectResponse
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update, BotCommand
 from telegram.helpers import escape_markdown
 from telegram.ext import (
@@ -22,6 +24,7 @@ from telegram.ext import (
     MessageHandler,
     filters,
 )
+from telegram.error import BadRequest
 
 # Setup logging
 logging.basicConfig(
@@ -81,13 +84,24 @@ from utils import (
     get_store_address
 )
 from rag_agent import RAGAgent
-from db import upsert_user
+from db import upsert_user, set_subscription
 
 @asynccontextmanager
 async def lifespan(fastapi_app: FastAPI):
     """Lifecycle events for FastAPI application."""
     logger.info("Initializing Telegram application...")
     try:
+        # Check Supabase status
+        from db import supabase
+        if supabase is None:
+            logger.warning(
+                "⚠️ Supabase client is NOT initialized! "
+                "Conversation history and user persistence will be disabled. "
+                "Please configure SUPABASE_URL and SUPABASE_KEY in your environment."
+            )
+        else:
+            logger.info("Supabase validation succeeded: persistence is enabled.")
+
         # Initialize global HTTP client
         utils.http_client = httpx.AsyncClient(
             auth=(WOOCOMMERCE_KEY, WOOCOMMERCE_SECRET),
@@ -107,7 +121,9 @@ async def lifespan(fastapi_app: FastAPI):
             "browse": "Browse categories",
             "search": "Search products",
             "my_order": "View order status",
-            "ask": "Ask the AI Shopping Assistant"
+            "ask": "Ask the AI Shopping Assistant",
+            "unsubscribe": "Opt out of promotional messages",
+            "subscribe": "Opt in to promotional messages"
         }
 
         for group in application.handlers.values():
@@ -286,11 +302,14 @@ async def get_order_by_id(order_id):
 user_agents = {}
 
 
-async def ai_chat_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def ai_chat_handler(update: Update, context: ContextTypes.DEFAULT_TYPE, direct_message: str = None):
     """Handle conversational AI queries"""
     user_id = update.effective_user.id
     
-    if update.callback_query and update.callback_query.data == "retry_ai_chat":
+    if direct_message:
+        user_message = direct_message
+        context.user_data["last_ai_query"] = user_message
+    elif update.callback_query and update.callback_query.data == "retry_ai_chat":
         await update.callback_query.answer()
         user_message = context.user_data.get("last_ai_query")
         if not user_message:
@@ -335,23 +354,32 @@ async def ai_chat_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Split long responses (Telegram has 4096 char limit)
         if len(response) > 4000:
             for i in range(0, len(response), 4000):
-                if i + 4000 >= len(response):
+                chunk = response[i:i+4000]
+                is_last = (i + 4000 >= len(response))
+                markup = reply_markup if is_last else None
+                try:
                     await update.effective_message.reply_text(
-                        response[i:],
-                        reply_markup=reply_markup,
+                        chunk,
+                        reply_markup=markup,
                         parse_mode="Markdown"
                     )
-                else:
+                except BadRequest:
                     await update.effective_message.reply_text(
-                        response[i:i+4000],
-                        parse_mode="Markdown"
+                        chunk,
+                        reply_markup=markup
                     )
         else:
-            await update.effective_message.reply_text(
-                response,
-                reply_markup=reply_markup,
-                parse_mode="Markdown"
-            )
+            try:
+                await update.effective_message.reply_text(
+                    response,
+                    reply_markup=reply_markup,
+                    parse_mode="Markdown"
+                )
+            except BadRequest:
+                await update.effective_message.reply_text(
+                    response,
+                    reply_markup=reply_markup
+                )
 
     except Exception as e:
         logger.error("AI chat error: %s", str(e))
@@ -376,12 +404,7 @@ async def ask_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     question = " ".join(context.args)
-    original_text = update.message.text
-    update.message.text = question
-    try:
-        await ai_chat_handler(update, context)
-    finally:
-        update.message.text = original_text
+    await ai_chat_handler(update, context, direct_message=question)
 
 
 async def ask_ai_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -467,6 +490,10 @@ async def start_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
 
+    # Clear pending states but NOT the cart
+    context.user_data.pop("waiting_for_search", None)
+    context.user_data.pop("waiting_for_order_lookup", None)
+
     first_name = update.effective_user.first_name if update.effective_user else None
     cart_items = context.user_data.get("cart", [])
     cart_count = sum(item.get("quantity", 1) for item in cart_items)
@@ -500,16 +527,24 @@ async def browse_products(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await update.effective_message.reply_text(text=no_cat_text)
             return
 
-        # Organize categories hierarchically
-        category_ids = {c["id"] for c in categories}
-        # A category's parent is considered "missing/root" if parent ID is 0 or parent ID is not in our category list.
-        roots = [c for c in categories if c.get("parent", 0) == 0 or c.get("parent") not in category_ids]
+        # Hide categories with 0 products
+        categories = [c for c in categories if c.get("count", 0) > 0]
 
-        # Sort roots by menu_order then name
+        def is_offer(cat):
+            name = cat.get("name", "").lower()
+            return "%" in name or "offer" in name or "discount" in name or "sale" in name
+
+        offer_categories = [c for c in categories if is_offer(c)]
+        regular_categories = [c for c in categories if not is_offer(c)]
+
+        # Organize regular categories hierarchically
+        category_ids = {c["id"] for c in regular_categories}
+        roots = [c for c in regular_categories if c.get("parent", 0) == 0 or c.get("parent") not in category_ids]
+
         roots.sort(key=lambda x: (x.get("menu_order", 0), x.get("name", "").lower()))
 
         categories_by_parent = {}
-        for c in categories:
+        for c in regular_categories:
             p_id = c.get("parent", 0)
             categories_by_parent.setdefault(p_id, []).append(c)
 
@@ -532,8 +567,20 @@ async def browse_products(update: Update, context: ContextTypes.DEFAULT_TYPE):
         for root in roots:
             add_children(root, 0)
 
-        text = "👔 *Select a Category*\n\n"
+        text = ""
         keyboard = []
+
+        if offer_categories:
+            offer_categories.sort(key=lambda x: (x.get("menu_order", 0), x.get("name", "").lower()))
+            text += "🎁 *Discount Offers*\n"
+            for cat in offer_categories:
+                name = cat.get("name", "Offer")
+                count = cat.get("count", 0)
+                keyboard.append([InlineKeyboardButton(f"🎟️ {name} ({count})", callback_data=f"cat_{cat['id']}_1")])
+
+            text += "\n👔 *Regular Categories*\n"
+        else:
+            text += "👔 *Select a Category*\n\n"
 
         for category, depth in ordered_categories:
             name = category.get("name", "Category")
@@ -928,7 +975,23 @@ async def handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 for item in items:
                     text += f"  • {md(item.get('name', 'Item'))} (qty: {md(item.get('quantity', ''))})\n"
 
-            keyboard = [[InlineKeyboardButton("← Back", callback_data="start_menu")]]
+            # Check tracking info
+            consignment_id, tracking_url = get_tracking_info(order)
+            if consignment_id and tracking_url:
+                text += f"\n🚚 *Courier Tracking*\n"
+                text += f"Tracking ID: `{md(consignment_id)}`\n"
+
+                # Fetch Pathao live status if available
+                if "pathao" in tracking_url.lower():
+                    pathao_status = await get_pathao_tracking_status(consignment_id)
+                    if pathao_status:
+                        text += f"\n{pathao_status}"
+
+            keyboard = []
+            if consignment_id and tracking_url:
+                keyboard.append([InlineKeyboardButton("🌐 Track Package", url=tracking_url)])
+
+            keyboard.append([InlineKeyboardButton("← Back", callback_data="start_menu")])
             reply_markup = InlineKeyboardMarkup(keyboard)
 
             await update.message.reply_text(text=text, reply_markup=reply_markup, parse_mode="Markdown")
@@ -942,17 +1005,10 @@ async def handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await ai_chat_handler(update, context)
 
 
-async def back_to_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Go back to main menu."""
-    query = update.callback_query
-    await query.answer()
-    context.user_data.clear()
-    await start(update, context)
-
-
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Help command - displays FAQ options."""
-    context.user_data.clear()
+    context.user_data.pop("waiting_for_search", None)
+    context.user_data.pop("waiting_for_order_lookup", None)
 
     text = (
         "🤖 *DEEN Commerce Customer Care*\n\n"
@@ -1157,6 +1213,18 @@ async def checkout(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode="Markdown"
     )
 
+
+async def unsubscribe_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Allow user to opt out of broadcasts."""
+    set_subscription(update.effective_user.id, False)
+    await update.message.reply_text("🔇 You have been *unsubscribed* from promotional broadcasts.\n\nUse /subscribe to opt back in.", parse_mode="Markdown")
+
+
+async def subscribe_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Allow user to opt into broadcasts."""
+    set_subscription(update.effective_user.id, True)
+    await update.message.reply_text("🔊 You are now *subscribed* to promotional broadcasts!", parse_mode="Markdown")
+
 # ==================== Register Handlers ====================
 
 application.add_handler(CommandHandler("start", start))
@@ -1165,6 +1233,8 @@ application.add_handler(CommandHandler("browse", browse_products))
 application.add_handler(CommandHandler("search", search_handler))
 application.add_handler(CommandHandler("my_order", my_order_handler))
 application.add_handler(CommandHandler("ask", ask_command))
+application.add_handler(CommandHandler("unsubscribe", unsubscribe_command))
+application.add_handler(CommandHandler("subscribe", subscribe_command))
 application.add_handler(CallbackQueryHandler(browse_products, pattern="^browse$"))
 application.add_handler(CallbackQueryHandler(show_products, pattern=r"^cat_\d+_\d+$"))
 application.add_handler(CallbackQueryHandler(show_products, pattern=r"^products_all_\d+$"))
@@ -1179,7 +1249,7 @@ application.add_handler(CallbackQueryHandler(view_cart, pattern="^view_cart$"))
 application.add_handler(CallbackQueryHandler(empty_cart, pattern="^empty_cart$"))
 application.add_handler(CallbackQueryHandler(checkout, pattern="^checkout$"))
 application.add_handler(CallbackQueryHandler(show_size_chart_handler, pattern="^size_chart_"))
-application.add_handler(CallbackQueryHandler(back_to_menu, pattern="^start_menu$"))
+application.add_handler(CallbackQueryHandler(start_menu, pattern="^start_menu$"))
 application.add_handler(CallbackQueryHandler(help_command, pattern="^help_menu$"))
 application.add_handler(CallbackQueryHandler(faq_handler, pattern="^faq_"))
 application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_input))
@@ -1205,6 +1275,278 @@ async def webhook(request: Request):
         logger.error("Error processing update: %s", str(e))
         return {"ok": False, "error": str(e)}
 
+
+class BroadcastMessage(BaseModel):
+    secret: str
+    message: str
+
+
+@app.post("/admin/broadcast")
+async def broadcast_offer(payload: BroadcastMessage):
+    """Broadcast a message (like a 50% discount) to all known users."""
+    if payload.secret != TELEGRAM_WEBHOOK_SECRET:
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+    from db import supabase
+    if supabase is None:
+        raise HTTPException(status_code=500, detail="Supabase not configured. Cannot fetch users.")
+
+    # Fetch all users, checking their subscription status
+    response = supabase.table("users").select("id, is_subscribed").execute()
+    users = response.data or []
+
+    success_count = 0
+    for user in users:
+        # Default to True if is_subscribed is None/missing
+        if user.get("is_subscribed") is False:
+            continue
+        try:
+            await application.bot.send_message(chat_id=user["id"], text=payload.message, parse_mode="Markdown")
+            success_count += 1
+        except Exception as e:
+            logger.warning("Failed to send broadcast to %s: %s", user["id"], str(e))
+
+    return {"status": "Broadcast complete", "sent": success_count, "total": len(users)}
+
+
+@app.get("/admin/login", response_class=HTMLResponse)
+async def admin_login_page():
+    """Display the login form for the admin dashboard."""
+    return """
+    <html>
+        <head>
+            <title>Admin Login - DeenCommerce</title>
+            <style>
+                body { font-family: system-ui, sans-serif; background: #f4f4f9; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; }
+                .login-card { background: white; padding: 30px; border-radius: 8px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); width: 300px; text-align: center; }
+                input[type="password"] { width: 100%; padding: 10px; margin: 15px 0; border: 1px solid #ddd; border-radius: 4px; box-sizing: border-box; }
+                button { background: #007bff; color: white; border: none; padding: 10px 15px; border-radius: 4px; cursor: pointer; width: 100%; font-weight: bold; }
+                button:hover { background: #0056b3; }
+            </style>
+        </head>
+        <body>
+            <div class="login-card">
+                <h2>🔒 Admin Access</h2>
+                <form method="POST" action="/admin/login">
+                    <input type="password" name="password" placeholder="Enter Webhook Secret" required>
+                    <button type="submit">Login</button>
+                </form>
+            </div>
+        </body>
+    </html>
+    """
+
+
+@app.post("/admin/login")
+async def admin_login_post(request: Request):
+    """Process the login form submission."""
+    body = await request.body()
+    import urllib.parse
+    parsed = urllib.parse.parse_qs(body.decode('utf-8'))
+    password = parsed.get("password", [""])[0]
+    
+    if password == TELEGRAM_WEBHOOK_SECRET:
+        response = RedirectResponse(url="/admin/dashboard", status_code=303)
+        # Set a session cookie valid for 1 day
+        response.set_cookie(key="admin_session", value=TELEGRAM_WEBHOOK_SECRET, httponly=True, max_age=86400)
+        return response
+        
+    return HTMLResponse("<h1>❌ Invalid Password</h1><a href='/admin/login'>Try again</a>", status_code=401)
+
+
+@app.get("/admin/logout")
+async def admin_logout():
+    """Log out the admin user."""
+    response = RedirectResponse(url="/admin/login", status_code=303)
+    response.delete_cookie("admin_session")
+    return response
+
+
+@app.get("/admin/dashboard", response_class=HTMLResponse)
+async def admin_dashboard(request: Request):
+    """A simple HTML dashboard for tracking customers and AI usage."""
+    session_cookie = request.cookies.get("admin_session")
+    if session_cookie != TELEGRAM_WEBHOOK_SECRET:
+        return RedirectResponse(url="/admin/login", status_code=303)
+    
+    from db import supabase
+    if not supabase:
+        return "<h1>Supabase not configured</h1>"
+    
+    try:
+        response = supabase.table("users").select("id, first_name, is_subscribed, chat_history").execute()
+        users = response.data or []
+    except Exception as e:
+        return f"<h1>Error fetching data: {e}</h1>"
+
+    total_users = len(users)
+    subscribed_users = sum(1 for u in users if u.get("is_subscribed") is not False)
+    
+    total_ai_queries = 0
+    active_ai_users = 0
+    rows = ""
+
+    for u in users:
+        history = u.get("chat_history") or []
+        queries = sum(1 for msg in history if msg.get("role") == "user")
+        if queries > 0:
+            active_ai_users += 1
+        total_ai_queries += queries
+        
+        sub_status = "✅ Yes" if u.get("is_subscribed") is not False else "❌ No"
+        name = html.escape(u.get("first_name") or "N/A")
+        
+        action_btn = f"<a href='/admin/chat_logs/{u.get('id')}' class='btn-view'>💬 View Logs</a>" if queries > 0 else "<span style='color:#ccc;'>No AI Chat</span>"
+        
+        rows += f"<tr><td>{u.get('id')}</td><td>{name}</td><td>{sub_status}</td><td>{queries}</td><td>{action_btn}</td></tr>"
+
+    return f"""
+    <html>
+        <head>
+            <title>DeenCommerce Admin</title>
+            <!-- DataTables CSS -->
+            <link rel="stylesheet" href="https://cdn.datatables.net/1.13.6/css/jquery.dataTables.min.css">
+            <style>
+                body {{ font-family: system-ui, sans-serif; margin: 40px; background: #f4f4f9; color: #333; }}
+                .header {{ display: flex; justify-content: space-between; align-items: center; }}
+                .logout-btn {{ background: #dc3545; color: white; text-decoration: none; padding: 8px 15px; border-radius: 4px; font-weight: bold; font-size: 14px; }}
+                .logout-btn:hover {{ background: #c82333; }}
+                .card {{ background: white; padding: 20px; margin-bottom: 20px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }}
+                .btn-view {{ background: #17a2b8; color: white; text-decoration: none; padding: 5px 10px; border-radius: 4px; font-size: 13px; }}
+                .btn-view:hover {{ background: #138496; }}
+                table {{ width: 100%; border-collapse: collapse; margin-top: 15px; }}
+                th, td {{ padding: 12px; border-bottom: 1px solid #ddd; text-align: left; }}
+            </style>
+        </head>
+        <body>
+            <div class="header">
+                <h1>🤖 DeenCommerce Bot Admin Dashboard</h1>
+                <a href="/admin/logout" class="logout-btn">Logout</a>
+            </div>
+            
+            <div class="card">
+                <h2>📊 Quick Stats</h2>
+                <p><strong>Total Customers:</strong> {total_users}</p>
+                <p><strong>Subscribed to Broadcasts:</strong> {subscribed_users}</p>
+                <p><strong>Customers Using AI:</strong> {active_ai_users}</p>
+                <p><strong>Total AI Queries:</strong> {total_ai_queries}</p>
+            </div>
+
+            <div class="card">
+                <h2>👥 Customer List</h2>
+                <table id="usersTable" class="display">
+                    <thead>
+                        <tr>
+                            <th>Telegram ID</th>
+                            <th>Name</th>
+                            <th>Subscribed</th>
+                            <th>AI Queries</th>
+                            <th>Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {rows}
+                    </tbody>
+                </table>
+            </div>
+            
+            <!-- jQuery and DataTables JS -->
+            <script src="https://code.jquery.com/jquery-3.7.0.min.js"></script>
+            <script src="https://cdn.datatables.net/1.13.6/js/jquery.dataTables.min.js"></script>
+            <script>
+                $(document).ready(function() {{
+                    $('#usersTable').DataTable({{
+                        "pageLength": 25,
+                        "order": [[ 3, "desc" ]] // Automatically sort by highest AI queries first
+                    }});
+                }});
+            </script>
+        </body>
+    </html>
+    """
+
+
+@app.get("/admin/chat_logs/{user_id}", response_class=HTMLResponse)
+async def admin_chat_logs(user_id: int, request: Request):
+    """Display the chat history for a specific user."""
+    session_cookie = request.cookies.get("admin_session")
+    if session_cookie != TELEGRAM_WEBHOOK_SECRET:
+        return RedirectResponse(url="/admin/login", status_code=303)
+    
+    from db import supabase
+    if not supabase:
+        return "<h1>Supabase not configured</h1>"
+    
+    try:
+        response = supabase.table("users").select("first_name, chat_history").eq("id", user_id).execute()
+        if not response.data:
+            return "<h1>User not found</h1>"
+        user_data = response.data[0]
+    except Exception as e:
+        return f"<h1>Error fetching data: {e}</h1>"
+    
+    history = user_data.get("chat_history") or []
+    name = html.escape(user_data.get("first_name") or "User")
+    
+    chat_html = ""
+    for msg in history:
+        role = msg.get("role")
+        content = msg.get("content")
+        
+        # Handle potential list content (like Anthropic tool execution results) safely
+        if isinstance(content, list) or isinstance(content, dict):
+            import json
+            content_text = json.dumps(content, indent=2)
+        else:
+            content_text = str(content) if content else ""
+            
+        safe_content = html.escape(content_text)
+            
+        if role == "user":
+            if isinstance(content, list):
+                chat_html += f"<div class='msg tool'><b>System Update (Tool Return):</b><br><pre>{safe_content}</pre></div>"
+            else:
+                chat_html += f"<div class='msg user'><b>👤 User:</b><br>{safe_content}</div>"
+        elif role == "assistant":
+            if not content_text and msg.get("tool_calls"):
+                chat_html += "<div class='msg tool'><b>🤖 AI:</b> <i>[Triggered Tool Search]</i></div>"
+            else:
+                chat_html += f"<div class='msg ai'><b>🤖 AI:</b><br><pre>{safe_content}</pre></div>"
+        elif role == "tool":
+            tool_name = msg.get("name", "Unknown Tool")
+            chat_html += f"<div class='msg tool'><b>🔧 Tool ({html.escape(tool_name)}):</b> <i>Executed</i></div>"
+
+    if not chat_html:
+        chat_html = "<p>No AI chat history available for this user.</p>"
+
+    return f"""
+    <html>
+        <head>
+            <title>Chat Logs - {name}</title>
+            <style>
+                body {{ font-family: system-ui, sans-serif; margin: 40px; background: #f4f4f9; color: #333; }}
+                .header {{ display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; }}
+                .back-btn {{ background: #6c757d; color: white; text-decoration: none; padding: 8px 15px; border-radius: 4px; font-weight: bold; font-size: 14px; }}
+                .back-btn:hover {{ background: #5a6268; }}
+                .chat-container {{ background: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); max-width: 800px; margin: auto; }}
+                .msg {{ padding: 12px; margin-bottom: 10px; border-radius: 8px; line-height: 1.5; }}
+                .user {{ background: #d1ecf1; color: #0c5460; text-align: left; border-left: 5px solid #17a2b8; }}
+                .ai {{ background: #e2e3e5; color: #383d41; text-align: left; border-left: 5px solid #6c757d; }}
+                .tool {{ background: #f8f9fa; color: #6c757d; font-size: 0.85em; border: 1px dashed #ddd; }}
+                pre {{ white-space: pre-wrap; margin: 5px 0 0 0; font-family: inherit; }}
+            </style>
+        </head>
+        <body>
+            <div style="max-width: 800px; margin: auto;">
+                <div class="header">
+                    <h2>Chat Logs: {name} (ID: {user_id})</h2>
+                    <a href="/admin/dashboard" class="back-btn">← Back to Dashboard</a>
+                </div>
+                <div class="chat-container">{chat_html}</div>
+            </div>
+        </body>
+    </html>
+    """
 
 @app.get("/")
 async def root():
