@@ -30,6 +30,7 @@ from utils import (
     extract_bengali_order_context,
     bn_to_arabic,
 )
+from main import get_categories
 from db import get_user_history, update_user_history
 
 
@@ -461,14 +462,13 @@ class RAGAgent:
     async def show_categories(self):
         """Browse or show categories of products"""
         self.extra_buttons.append({"text": "👔 Browse Categories", "callback_data": "browse"})
-        categories = await woo_get(
-            "products/categories",
-            params={"per_page": 20, "orderby": "name", "order": "asc", "hide_empty": True},
-        )
+        self.extra_buttons.append({"text": "🎁 Offers & Discounts", "callback_data": "offers"})
+        categories = await get_categories(limit=20)
+
         if isinstance(categories, list) and categories:
             cat_names = [c["name"] for c in categories if c.get("count", 0) > 0][:10]
-            return "Here are some of our clothing categories:\n" + ", ".join(cat_names) + "\n\nClick the button below to browse all categories!"
-        return "Click the button below to browse all clothing categories."
+            return "Here are some of our clothing categories:\n" + ", ".join(cat_names) + "\n\nClick the buttons below to browse all categories or current offers!"
+        return "Click the buttons below to browse all clothing categories."
 
     async def trigger_order_lookup(self):
         """Guide the user to check their order using the secure lookup form"""

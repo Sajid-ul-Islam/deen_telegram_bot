@@ -119,6 +119,7 @@ async def lifespan(fastapi_app: FastAPI):
             "start": "Start the bot & main menu",
             "help": "Support and FAQs",
             "browse": "Browse categories",
+            "offers": "Discount Offers",
             "search": "Search products",
             "my_order": "View order status",
             "ask": "Ask the AI Shopping Assistant",
@@ -177,7 +178,8 @@ app = FastAPI(lifespan=lifespan)
 
 def main_menu(first_name=None, cart_count=0):
     keyboard = [
-        [InlineKeyboardButton("👔 Categories", callback_data="browse")],
+        [InlineKeyboardButton("👔 Categories", callback_data="browse"),
+         InlineKeyboardButton("🎁 Offers", callback_data="offers")],
         [InlineKeyboardButton("🆕 Latest Products", callback_data="products_all_1")],
         [InlineKeyboardButton("🔍 Search", callback_data="search")],
         [InlineKeyboardButton("📦 My Order", callback_data="my_order")],
@@ -613,17 +615,33 @@ async def browse_products(update: Update, context: ContextTypes.DEFAULT_TYPE):
             name = cat.get("name", "").lower()
             return "%" in name or "offer" in name or "discount" in name or "sale" in name
 
-        offer_categories = [c for c in categories if is_offer(c)]
-        regular_categories = [c for c in categories if not is_offer(c)]
+        # Determine mode from callback data or command
+        mode = "browse"
+        if query and query.data == "offers":
+            mode = "offers"
+        elif update.message and update.message.text and "/offers" in update.message.text:
+            mode = "offers"
 
-        # Organize regular categories hierarchically
-        category_ids = {c["id"] for c in regular_categories}
-        roots = [c for c in regular_categories if c.get("parent", 0) == 0 or c.get("parent") not in category_ids]
+        if mode == "offers":
+            target_categories = [c for c in categories if is_offer(c)]
+            if not target_categories:
+                msg = "No special offers available right now."
+                if query:
+                    await query.edit_message_text(text=msg)
+                else:
+                    await update.effective_message.reply_text(text=msg)
+                return
+        else:
+            target_categories = [c for c in categories if not is_offer(c)]
+
+        # Organize categories hierarchically
+        category_ids = {c["id"] for c in target_categories}
+        roots = [c for c in target_categories if c.get("parent", 0) == 0 or c.get("parent") not in category_ids]
 
         roots.sort(key=lambda x: (x.get("menu_order", 0), x.get("name", "").lower()))
 
         categories_by_parent = {}
-        for c in regular_categories:
+        for c in target_categories:
             p_id = c.get("parent", 0)
             categories_by_parent.setdefault(p_id, []).append(c)
 
@@ -649,15 +667,8 @@ async def browse_products(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text = ""
         keyboard = []
 
-        if offer_categories:
-            offer_categories.sort(key=lambda x: (x.get("menu_order", 0), x.get("name", "").lower()))
-            text += "🎁 *Discount Offers*\n"
-            for cat in offer_categories:
-                name = cat.get("name", "Offer")
-                count = cat.get("count", 0)
-                keyboard.append([InlineKeyboardButton(f"🎟️ {name} ({count})", callback_data=f"cat_{cat['id']}_1")])
-
-            text += "\n👔 *Regular Categories*\n"
+        if mode == "offers":
+            text += "🎁 *Discount Offers*\n\n"
         else:
             text += "👔 *Select a Category*\n\n"
 
@@ -1329,12 +1340,13 @@ async def subscribe_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 application.add_handler(CommandHandler("start", start))
 application.add_handler(CommandHandler("help", help_command))
 application.add_handler(CommandHandler("browse", browse_products))
+application.add_handler(CommandHandler("offers", browse_products))
 application.add_handler(CommandHandler("search", search_handler))
 application.add_handler(CommandHandler("my_order", my_order_handler))
 application.add_handler(CommandHandler("ask", ask_command))
 application.add_handler(CommandHandler("unsubscribe", unsubscribe_command))
 application.add_handler(CommandHandler("subscribe", subscribe_command))
-application.add_handler(CallbackQueryHandler(browse_products, pattern="^browse$"))
+application.add_handler(CallbackQueryHandler(browse_products, pattern="^(browse|offers)$"))
 application.add_handler(CallbackQueryHandler(show_products, pattern=r"^cat_\d+_\d+$"))
 application.add_handler(CallbackQueryHandler(show_products, pattern=r"^products_all_\d+$"))
 application.add_handler(CallbackQueryHandler(search_handler, pattern="^search$"))
