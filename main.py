@@ -1368,9 +1368,14 @@ async def broadcast_offer(payload: BroadcastMessage):
     if supabase is None:
         raise HTTPException(status_code=500, detail="Supabase not configured. Cannot fetch users.")
 
-    # Fetch all users, checking their subscription status
-    response = supabase.table("users").select("id, is_subscribed").execute()
-    users = response.data or []
+    # Fetch all users — try with is_subscribed, fall back if column doesn't exist yet
+    try:
+        response = supabase.table("users").select("id, is_subscribed").execute()
+        users = response.data or []
+    except Exception:
+        logger.warning("is_subscribed column missing, broadcasting to all users.")
+        response = supabase.table("users").select("id").execute()
+        users = response.data or []
 
     success_count = 0
     for user in users:
@@ -1454,7 +1459,17 @@ async def admin_dashboard(request: Request):
         response = supabase.table("users").select("id, first_name, is_subscribed, chat_history").execute()
         users = response.data or []
     except Exception as e:
-        return f"<h1>Error fetching data: {e}</h1>"
+        # Column may not exist yet — fall back without is_subscribed
+        err_str = str(e)
+        if "is_subscribed" in err_str or "42703" in err_str:
+            logger.warning("is_subscribed column missing in Supabase. Run: ALTER TABLE users ADD COLUMN IF NOT EXISTS is_subscribed BOOLEAN DEFAULT TRUE;")
+            try:
+                response = supabase.table("users").select("id, first_name, chat_history").execute()
+                users = response.data or []
+            except Exception as e2:
+                return f"<h1>Error fetching data: {html.escape(str(e2))}</h1><p>Please check your Supabase configuration.</p>"
+        else:
+            return f"<h1>Error fetching data: {html.escape(str(e))}</h1>"
 
     total_users = len(users)
     subscribed_users = sum(1 for u in users if u.get("is_subscribed") is not False)

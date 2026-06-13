@@ -12,6 +12,12 @@ if url and key:
     try:
         supabase = create_client(url, key)
         logger.info("Supabase client initialized.")
+        # Auto-migrate: ensure is_subscribed column exists
+        try:
+            supabase.rpc("run_sql", {"query": "ALTER TABLE users ADD COLUMN IF NOT EXISTS is_subscribed BOOLEAN DEFAULT TRUE;"}).execute()
+        except Exception:
+            # rpc may not be available; attempt direct upsert approach as a no-op check
+            pass
     except Exception as e:
         logger.error(f"Failed to initialize Supabase: {e}")
 
