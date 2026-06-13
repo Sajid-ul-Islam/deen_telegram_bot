@@ -2,7 +2,7 @@
 
 import json
 from typing import List, Dict
-from sentence_transformers import SentenceTransformer
+from fastembed import TextEmbedding
 import asyncio
 from db import supabase
 import logging
@@ -12,7 +12,7 @@ logger = logging.getLogger(__name__)
 class VectorStore:
     def __init__(self):
         """Initialize vector store"""
-        self.model = SentenceTransformer('all-MiniLM-L6-v2')
+        self.model = TextEmbedding("sentence-transformers/all-MiniLM-L6-v2")
         self.has_connection = supabase is not None
         
     def create_from_knowledge_base(self, knowledge_base_file: str = "woo_knowledge_base.json"):
@@ -42,7 +42,7 @@ Tags: {', '.join(product.get('tags', []))}
 Price: ৳{product['price']}
 SKU: {product['sku']}
 """
-            embedding = self.model.encode(text, convert_to_tensor=False).tolist()
+            embedding = list(self.model.embed([text]))[0].tolist()
             records.append({
                 "id": product['id'],
                 "content": text,
@@ -64,7 +64,7 @@ SKU: {product['sku']}
             page_records = []
             for i, page in enumerate(pages):
                 text = f"{page['title']}\n{page['content']}"
-                embedding = self.model.encode(text, convert_to_tensor=False).tolist()
+                embedding = list(self.model.embed([text]))[0].tolist()
                 page_records.append({
                     "id": page['id'],
                     "title": page['title'],
@@ -87,7 +87,7 @@ SKU: {product['sku']}
             return []
             
         def _search():
-            query_embedding = self.model.encode(query, convert_to_tensor=False).tolist()
+            query_embedding = list(self.model.embed([query]))[0].tolist()
             
             try:
                 response = supabase.rpc(
@@ -120,7 +120,7 @@ SKU: {product['sku']}
             return []
             
         def _search():
-            query_embedding = self.model.encode(query, convert_to_tensor=False).tolist()
+            query_embedding = list(self.model.embed([query]))[0].tolist()
             
             try:
                 response = supabase.rpc(
