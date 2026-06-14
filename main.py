@@ -1073,7 +1073,7 @@ async def _render_and_send_order(update: Update, context: ContextTypes.DEFAULT_T
     if items:
         text += "Items:\n"
         for item in items:
-            text += f"  • {md(item.get('name', 'Item'))} (qty: {md(str(item.get('quantity', ''))})\n"
+            text += f"  • {md(item.get('name', 'Item'))} (qty: {md(str(item.get('quantity', '')))} )\n"
 
     consignment_id, tracking_url = get_tracking_info(order)
     if consignment_id and tracking_url:
