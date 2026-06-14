@@ -283,7 +283,10 @@ async def get_categories(limit=100):
     import asyncio
     candidates = [c for c in categories if c.get("count", 0) > 0]
     checks = await asyncio.gather(*[_has_published_products(c["id"]) for c in candidates])
-    valid_categories = [c for c, ok in zip(candidates, checks) if ok]
+    valid_categories = [
+        c for c, ok in zip(candidates, checks) 
+        if ok and c.get("name", "").lower() not in ["uncategorized", "draft items", "drafts"]
+    ]
 
     if valid_categories:
         categories_cache.set(cache_key, valid_categories)
