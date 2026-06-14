@@ -1045,6 +1045,10 @@ async def contact_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if contact:
         user_id = update.effective_user.id
         phone = contact.phone_number
+        if phone.startswith('+88'):
+            phone = phone[3:]
+        elif phone.startswith('880'):
+            phone = phone[2:]
         from db import upsert_user
         upsert_user(user_id, update.effective_user.first_name, phone_number=phone)
         
