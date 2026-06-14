@@ -189,13 +189,20 @@ def get_providers_chain(primary_provider_name=None):
                     if cp_name not in PROVIDER_HEALTH:
                         PROVIDER_HEALTH[cp_name] = {"active": True, "status": "unknown", "last_error": ""}
                     
-                    providers_info[cp_name] = {
-                        "key_vars": [],
-                        "type": "openai",
-                        "default_model": row.get("default_model", ""),
-                        "constructor": (lambda key, url=row.get("base_url"): ("openai", openai.AsyncOpenAI(api_key=key, base_url=url, timeout=10.0))),
-                        "api_key_override": row.get("api_key", "")
-                    }
+                    if cp_name in providers_info:
+                        # Safely override key and model for existing core providers
+                        providers_info[cp_name]["api_key_override"] = row.get("api_key", "")
+                        if row.get("default_model"):
+                            providers_info[cp_name]["default_model"] = row.get("default_model")
+                    else:
+                        # Completely new custom provider
+                        providers_info[cp_name] = {
+                            "key_vars": [],
+                            "type": "openai",
+                            "default_model": row.get("default_model", ""),
+                            "constructor": (lambda key, url=row.get("base_url"): ("openai", openai.AsyncOpenAI(api_key=key, base_url=url, timeout=10.0))),
+                            "api_key_override": row.get("api_key", "")
+                        }
     except Exception as e:
         logger.error("Failed to load custom providers from Supabase: %s", str(e))
 
